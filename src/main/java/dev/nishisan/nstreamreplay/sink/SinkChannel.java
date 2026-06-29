@@ -1,6 +1,7 @@
 package dev.nishisan.nstreamreplay.sink;
 
 import dev.nishisan.nstreamreplay.config.Durability;
+import dev.nishisan.nstreamreplay.config.OnWriteError;
 import dev.nishisan.nstreamreplay.config.SinkProperties;
 import dev.nishisan.nstreamreplay.model.ReplayRecord;
 import org.slf4j.Logger;
@@ -8,6 +9,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Unidade de isolamento de um destino: agrega a {@link DurableSinkQueue}, o {@link Sink} e o
@@ -15,7 +17,7 @@ import java.io.IOException;
  * o forwarder drena e entrega de forma independente. Um destino offline só faz crescer/dropar a
  * sua fila — sem afetar a origem nem os demais destinos.
  */
-public final class SinkChannel implements Closeable {
+public final class SinkChannel implements SinkTarget, Closeable {
 
     private static final Logger LOG = LoggerFactory.getLogger(SinkChannel.class);
 
@@ -24,15 +26,19 @@ public final class SinkChannel implements Closeable {
     private final Sink sink;
     private final SinkForwarder forwarder;
     private final Durability durability;
+    private final OnWriteError onWriteError;
 
+    private final AtomicLong offerErrors = new AtomicLong();
     private volatile Thread thread;
 
-    SinkChannel(String id, DurableSinkQueue queue, Sink sink, SinkForwarder forwarder, Durability durability) {
+    SinkChannel(String id, DurableSinkQueue queue, Sink sink, SinkForwarder forwarder,
+                Durability durability, OnWriteError onWriteError) {
         this.id = id;
         this.queue = queue;
         this.sink = sink;
         this.forwarder = forwarder;
         this.durability = durability;
+        this.onWriteError = onWriteError;
     }
 
     /** Constrói o canal completo (fila em disco + producer Kafka + forwarder) a partir da config. */
@@ -41,7 +47,8 @@ public final class SinkChannel implements Closeable {
         Sink sink = new KafkaSink(props);
         SinkForwarder forwarder = new SinkForwarder(
                 props.id(), queue, sink, props.queue().forwarderRetryBackoffMs());
-        return new SinkChannel(props.id(), queue, sink, forwarder, props.queue().durability());
+        return new SinkChannel(props.id(), queue, sink, forwarder,
+                props.queue().durability(), props.queue().onWriteError());
     }
 
     /** Sobe a thread do forwarder (chamado pelo engine ANTES de iniciar as origens). */
@@ -54,29 +61,50 @@ public final class SinkChannel implements Closeable {
     }
 
     /**
-     * Enfileira o registro na fila durável deste destino (não bloqueia). Pode lançar
-     * {@link IOException} (ex.: disco cheio) — a origem decide drop/halt conforme a política.
+     * Enfileira o registro na fila durável deste destino (não bloqueia). Em falha de escrita
+     * local (ex.: disco cheio): sob {@code onWriteError=drop} loga + contabiliza {@code offerErrors}
+     * e devolve {@code false} (isolamento — a origem segue); sob {@code halt} relança a
+     * {@link IOException} (a origem para sem commitar).
      */
+    @Override
     public boolean offer(ReplayRecord record) throws IOException {
-        return queue.offer(record);
+        try {
+            return queue.offer(record);
+        } catch (IOException e) {
+            if (onWriteError == OnWriteError.HALT) {
+                throw e;
+            }
+            long n = offerErrors.incrementAndGet();
+            LOG.warn("[{}] falha de escrita local — registro descartado (onWriteError=drop, offerErrors={})",
+                    id, n, e);
+            return false;
+        }
     }
 
     /** A durabilidade exige {@code sync()} no boundary do commit da origem? (apenas SYNC_ON_COMMIT). */
+    @Override
     public boolean requiresSyncBeforeCommit() {
         return durability == Durability.SYNC_ON_COMMIT;
     }
 
     /** Força fsync da fila (group-commit antes do commit da origem). */
+    @Override
     public void sync() throws IOException {
         queue.sync();
     }
 
+    @Override
     public String id() {
         return id;
     }
 
     public long depth() {
         return queue.depth();
+    }
+
+    /** Total de falhas de escrita local absorvidas (onWriteError=drop) — perda, deve ser alertado. */
+    public long offerErrors() {
+        return offerErrors.get();
     }
 
     public long dropped() {

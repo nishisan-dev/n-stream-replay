@@ -27,7 +27,7 @@ class SinkChannelTest {
                 durability, OnWriteError.DROP, 64, 0L);
         DurableSinkQueue queue = DurableSinkQueue.open("d1", cfg);
         SinkForwarder forwarder = new SinkForwarder("d1", queue, sink, 0L);
-        return new SinkChannel("d1", queue, sink, forwarder, durability);
+        return new SinkChannel("d1", queue, sink, forwarder, durability, OnWriteError.DROP);
     }
 
     @Test

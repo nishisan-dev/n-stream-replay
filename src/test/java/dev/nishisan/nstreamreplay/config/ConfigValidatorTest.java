@@ -32,7 +32,7 @@ class ConfigValidatorTest {
     private static NStreamReplayProperties cfg(List<SourceProperties> sources,
                                                List<SinkProperties> sinks,
                                                List<PipelineProperties> pipelines) {
-        return new NStreamReplayProperties(sources, sinks, pipelines);
+        return new NStreamReplayProperties(sources, sinks, pipelines, null);
     }
 
     @Test

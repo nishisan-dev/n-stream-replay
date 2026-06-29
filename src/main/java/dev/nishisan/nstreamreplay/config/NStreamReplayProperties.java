@@ -24,5 +24,6 @@ import java.util.List;
 public record NStreamReplayProperties(
         @NotEmpty @Valid List<SourceProperties> sources,
         @NotEmpty @Valid List<SinkProperties> sinks,
-        @NotEmpty @Valid List<PipelineProperties> pipelines) {
+        @NotEmpty @Valid List<PipelineProperties> pipelines,
+        @Valid List<RouteProperties> routes) {
 }

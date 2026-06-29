@@ -145,4 +145,35 @@ class NStreamReplayPropertiesBindingTest {
         assertThat(q.batchSize()).isEqualTo(256);
         assertThat(q.forwarderRetryBackoffMs()).isEqualTo(1000L);
     }
+
+    @Test
+    void ligaRotasComToTopicOpcional() {
+        String yaml = """
+                nstreamreplay:
+                  sources:
+                    - { id: s1, bootstrapServers: "h:9092", topics: [ t ], groupId: g }
+                  sinks:
+                    - { id: d1, bootstrapServers: "h:9092", topic: out }
+                  pipelines:
+                    - { id: p1, source: s1, sinks: [ d1 ] }
+                  routes:
+                    - id: r1
+                      source: s1
+                      fromTopic: orders.in
+                      to:
+                        - { sink: d1 }
+                        - { sink: d1, toTopic: orders.raw }
+                """;
+
+        NStreamReplayProperties props = bind(yaml);
+
+        RouteProperties r = props.routes().get(0);
+        assertThat(r.id()).isEqualTo("r1");
+        assertThat(r.source()).isEqualTo("s1");
+        assertThat(r.fromTopic()).isEqualTo("orders.in");
+        assertThat(r.to()).hasSize(2);
+        assertThat(r.to().get(0).sink()).isEqualTo("d1");
+        assertThat(r.to().get(0).toTopic()).isNull();              // preserva
+        assertThat(r.to().get(1).toTopic()).isEqualTo("orders.raw");
+    }
 }

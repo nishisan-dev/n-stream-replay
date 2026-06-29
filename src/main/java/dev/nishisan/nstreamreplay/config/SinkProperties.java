@@ -15,7 +15,6 @@ import java.util.Map;
  *
  * @param id              identificador único; referência em pipelines e nome de métrica
  * @param bootstrapServers servidores Kafka do destino
- * @param topic           tópico de destino
  * @param acks            {@code 0 | 1 | all}
  * @param lingerMs        {@code linger.ms}
  * @param compressionType {@code none | gzip | snappy | lz4 | zstd}
@@ -26,7 +25,6 @@ import java.util.Map;
 public record SinkProperties(
         @NotBlank String id,
         @NotBlank String bootstrapServers,
-        @NotBlank String topic,
         @NotBlank @DefaultValue("1") String acks,
         @PositiveOrZero @DefaultValue("50") int lingerMs,
         @NotBlank @DefaultValue("lz4") String compressionType,

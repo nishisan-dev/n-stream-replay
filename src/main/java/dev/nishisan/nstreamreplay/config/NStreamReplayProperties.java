@@ -13,17 +13,16 @@ import java.util.List;
  * <p>{@code ignoreUnknownFields=false} torna o boot <b>fail-loud</b>: uma chave desconhecida
  * (typo) aborta a inicialização em vez de ser silenciosamente ignorada. A validação JSR-380
  * roda na criação do bean ({@link Validated}); a validação cruzada de referências
- * (pipeline -> source/sink, ids únicos) é feita pelo {@link ConfigValidator}.
+ * (rota -> source/sink, ids únicos) é feita pelo {@link ConfigValidator}.
  *
- * @param sources   origens declaradas (não vazio)
- * @param sinks     destinos declarados (não vazio)
- * @param pipelines pipelines declarados (não vazio)
+ * @param sources origens declaradas (não vazio)
+ * @param sinks   destinos declarados (não vazio)
+ * @param routes  rotas declaradas (não vazio) — modelo de roteamento por tópico
  */
 @ConfigurationProperties(prefix = "nstreamreplay", ignoreUnknownFields = false)
 @Validated
 public record NStreamReplayProperties(
         @NotEmpty @Valid List<SourceProperties> sources,
         @NotEmpty @Valid List<SinkProperties> sinks,
-        @NotEmpty @Valid List<PipelineProperties> pipelines,
-        @Valid List<RouteProperties> routes) {
+        @NotEmpty @Valid List<RouteProperties> routes) {
 }

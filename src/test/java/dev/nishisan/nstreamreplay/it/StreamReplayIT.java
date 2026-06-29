@@ -101,16 +101,14 @@ class StreamReplayIT {
     private SinkChannel openSink(String id, String bootstrap, Path base) throws IOException {
         QueueProperties queue = new QueueProperties(base.toString(), 1_000_000, Duration.ZERO,
                 Durability.OS_MANAGED, OnWriteError.DROP, 256, 200L);
-        // topic é ignorado no v2 (vem da rota); mantido não-vazio só por validação do record.
-        SinkProperties props = new SinkProperties(id, bootstrap, "unused", "all", 0, "lz4",
-                1_048_576, Map.of(), queue);
+        SinkProperties props = new SinkProperties(id, bootstrap, "all", 0, "lz4", 1_048_576, Map.of(), queue);
         SinkChannel ch = SinkChannel.open(props);
         ch.startForwarder();
         return ch;
     }
 
     private SourceConsumer startSource(String id, RouteTable routes) {
-        SourceProperties props = new SourceProperties(id, bootstrap(), List.of("ignored"),
+        SourceProperties props = new SourceProperties(id, bootstrap(),
                 "grp-" + UUID.randomUUID(), null, "earliest", 500, 400L, Map.of());
         SourceConsumer src = new SourceConsumer(props, routes, NOOP);
         Thread t = new Thread(src, id + "-thread");

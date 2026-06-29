@@ -9,7 +9,7 @@ import java.util.function.Function;
 
 /**
  * Validação cruzada da configuração, executada no boot (fail-fast): garante ids únicos
- * por categoria e que todo pipeline referencie uma origem e destinos existentes. Falhas
+ * por categoria e que toda rota referencie uma origem e destinos existentes. Falhas
  * abortam a inicialização da aplicação — coerente com o {@code ignoreUnknownFields=false}
  * de {@link NStreamReplayProperties}.
  *
@@ -26,26 +26,11 @@ public class ConfigValidator {
     /**
      * Valida a configuração. Lança {@link IllegalStateException} na primeira violação.
      *
-     * @throws IllegalStateException se houver id duplicado ou referência de pipeline inexistente
+     * @throws IllegalStateException se houver id duplicado ou referência de rota inexistente
      */
     public static void validate(NStreamReplayProperties props) {
         Set<String> sourceIds = uniqueOrThrow(props.sources(), SourceProperties::id, "source");
         Set<String> sinkIds = uniqueOrThrow(props.sinks(), SinkProperties::id, "sink");
-
-        List<PipelineProperties> pipelines = props.pipelines() == null ? List.of() : props.pipelines();
-        uniqueOrThrow(pipelines, PipelineProperties::id, "pipeline");
-        for (PipelineProperties pipeline : pipelines) {
-            if (!sourceIds.contains(pipeline.source())) {
-                throw new IllegalStateException(
-                        "pipeline '" + pipeline.id() + "' referencia source inexistente: " + pipeline.source());
-            }
-            for (String sinkRef : pipeline.sinks()) {
-                if (!sinkIds.contains(sinkRef)) {
-                    throw new IllegalStateException(
-                            "pipeline '" + pipeline.id() + "' referencia sink inexistente: " + sinkRef);
-                }
-            }
-        }
 
         List<RouteProperties> routes = props.routes() == null ? List.of() : props.routes();
         uniqueOrThrow(routes, RouteProperties::id, "route");

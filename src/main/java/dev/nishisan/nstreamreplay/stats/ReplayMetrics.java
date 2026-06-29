@@ -6,6 +6,9 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+
 /**
  * Fachada de métricas sobre o {@code StatsUtils} do nishi-utils (exposto em
  * {@code /actuator/prometheus} pela ponte do nishi-utils-spring). Centraliza a convenção de
@@ -14,10 +17,11 @@ import org.springframework.stereotype.Component;
  * <p>É <b>null-safe</b>: quando não há bean {@code StatsUtils} no contexto (ex.: stats
  * desabilitado ou em teste fora do Spring), os métodos viram no-op.
  *
- * <p>Eventos de origem usam hit counters (contador + taxa). Os indicadores por destino são
- * empurrados periodicamente como gauges ({@code notifyCurrentValue}): profundidade, online e os
- * totais acumulados (publicados/descartados/expirados/poison/erros), permitindo alertar perda
- * silenciosa via {@code increase()} no Prometheus.
+ * <p><b>Apenas gauges ({@code notifyCurrentValue}):</b> a ponte do nishi-utils-spring, ao receber
+ * um {@code notifyHitCounter}, registra no Micrometer um Gauge <i>e</i> um Counter com o
+ * <b>mesmo nome</b>, o que o registry rejeita (conflito de tipo). Por isso todos os contadores
+ * são mantidos como totais cumulativos aqui e publicados como gauges monotônicos — alertáveis no
+ * Prometheus via {@code increase()}.
  */
 @Component
 public class ReplayMetrics {
@@ -25,6 +29,8 @@ public class ReplayMetrics {
     private static final String PREFIX = "nstreamreplay";
 
     private final StatsUtils stats;
+    private final ConcurrentHashMap<String, AtomicLong> consumed = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AtomicLong> commitErrors = new ConcurrentHashMap<>();
 
     @Autowired
     public ReplayMetrics(ObjectProvider<StatsUtils> provider) {
@@ -35,14 +41,16 @@ public class ReplayMetrics {
         this.stats = stats;
     }
 
-    /** Um record consumido da origem. */
+    /** Um record consumido da origem (incrementa o total e publica o gauge). */
     public void onConsumed(String sourceId) {
-        hit("source", sourceId, "consumed");
+        long total = consumed.computeIfAbsent(sourceId, k -> new AtomicLong()).incrementAndGet();
+        gauge("source", sourceId, "consumed_total", total);
     }
 
     /** Uma falha de commit da origem. */
     public void onCommitError(String sourceId) {
-        hit("source", sourceId, "commit_errors");
+        long total = commitErrors.computeIfAbsent(sourceId, k -> new AtomicLong()).incrementAndGet();
+        gauge("source", sourceId, "commit_errors_total", total);
     }
 
     /** Empurra os indicadores correntes de um destino (chamado periodicamente pelo engine). */
@@ -55,12 +63,6 @@ public class ReplayMetrics {
         gauge("sink", ch.id(), "poisoned_total", ch.poisonedTotal());
         gauge("sink", ch.id(), "offer_errors_total", ch.offerErrors());
         gauge("sink", ch.id(), "retry_backoffs_total", ch.retryBackoffs());
-    }
-
-    private void hit(String dim, String id, String metric) {
-        if (stats != null) {
-            stats.notifyHitCounter(name(dim, id, metric));
-        }
     }
 
     private void gauge(String dim, String id, String metric, long value) {

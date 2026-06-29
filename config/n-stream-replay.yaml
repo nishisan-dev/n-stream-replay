@@ -1,0 +1,47 @@
+# ════════════════════════════════════════════════════════════════════════════
+#  n-stream-replay — configuração de relay Kafka store-and-forward
+#
+#  Modelo: ORIGENS (sources) e DESTINOS (sinks) são listas planas com `id`.
+#  Um PIPELINE amarra 1 origem a N destinos por referência de id (fan-out 1->N).
+#  Cada DESTINO tem sua própria fila durável (NQueue) em `queue.basePath/<id>/`.
+#  Se um destino fica offline, suas mensagens ficam na fila e são re-entregues
+#  quando ele volta — sem travar a origem nem os demais destinos.
+# ════════════════════════════════════════════════════════════════════════════
+nstreamreplay:
+
+  # ── ORIGENS (consumers Kafka; kafka-clients cru, commit manual) ─────────────
+  sources:
+    - id: orders-src                       # único; vira referência e nome de métrica
+      bootstrapServers: "localhost:9092"
+      topics: [ "orders.in" ]              # 1..N tópicos consumidos por esta origem
+      groupId: "n-stream-replay.orders"    # consumer group (enable.auto.commit=false)
+      clientId: "nsr-orders-src"           # opcional (default = id)
+      autoOffsetReset: latest              # earliest | latest | none
+      maxPollRecords: 500
+      pollTimeoutMs: 1000
+      extraProps: {}                       # passthrough cru p/ o KafkaConsumer (SASL/TLS...)
+
+  # ── DESTINOS (producers Kafka + fila durável por destino) ───────────────────
+  sinks:
+    - id: dc2-mirror
+      bootstrapServers: "localhost:9092"
+      topic: "orders.mirror"               # 1 tópico de destino por sink
+      acks: all                            # 0 | 1 | all
+      lingerMs: 50
+      compressionType: lz4                 # none | gzip | snappy | lz4 | zstd
+      maxRequestSize: 1048576              # bytes (>= 1 MiB)
+      extraProps: {}                       # passthrough cru p/ o KafkaProducer
+      queue:                               # store-and-forward POR DESTINO
+        basePath: "var/n-stream-replay/queues"  # fila física em basePath/<sinkId>/
+        maxDepth: 200000                   # bound por CONTAGEM (drop-oldest)
+        retentionTime: 6h                  # bound por TEMPO (expireAfterWrite); 0s = off
+        durability: sync-on-commit         # sync-on-commit | per-record-fsync | os-managed
+        onWriteError: drop                 # drop | halt  (em falha de escrita local)
+        batchSize: 256                     # lote drenado por iteração do forwarder
+        forwarderRetryBackoffMs: 1000      # backoff quando o broker do destino está fora
+
+  # ── PIPELINES (amarram 1 origem a N destinos por id) ────────────────────────
+  pipelines:
+    - id: orders-fanout
+      source: orders-src                   # ref a sources[].id
+      sinks: [ dc2-mirror ]                # ref a sinks[].id (fan-out 1->N)

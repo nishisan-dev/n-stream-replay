@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.6</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>dev.nishisan</groupId>
+    <artifactId>n-stream-replay</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    <name>n-stream-replay</name>
+    <description>Relay Kafka store-and-forward: origem -&gt; pipeline -&gt; fila duravel por destino -&gt; destino</description>
+
+    <properties>
+        <java.version>25</java.version>
+        <kafka.version>3.9.0</kafka.version>
+        <nishi-utils.version>8.1.0</nishi-utils.version>
+        <nishi-utils-spring.version>2.1.1</nishi-utils-spring.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <dependencies>
+        <!-- Web servlet (requisito do NishisanStatsAutoConfiguration: ConditionalOnWebApplication=SERVLET) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <!-- Actuator + /actuator/prometheus -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+        <!-- @Validated em @ConfigurationProperties -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
+        <!-- NQueue + StatsUtils (traz jackson-dataformat-yaml + lz4 em compile) -->
+        <dependency>
+            <groupId>dev.nishisan</groupId>
+            <artifactId>nishi-utils-core</artifactId>
+            <version>${nishi-utils.version}</version>
+        </dependency>
+        <!-- Ponte StatsUtils -> Micrometer (bean statsUtils) -->
+        <dependency>
+            <groupId>dev.nishisan</groupId>
+            <artifactId>nishi-utils-spring</artifactId>
+            <version>${nishi-utils-spring.version}</version>
+        </dependency>
+
+        <!-- Consumers/producers kafka-clients cru -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+            <version>${kafka.version}</version>
+        </dependency>
+
+        <!-- Testes -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>kafka</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <mainClass>dev.nishisan.nstreamreplay.NStreamReplayApplication</mainClass>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>

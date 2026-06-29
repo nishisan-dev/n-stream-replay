@@ -1,0 +1,29 @@
+spring:
+  application:
+    name: n-stream-replay
+  # Importa a configuracao de app (sources/sinks/pipelines) externa, ao lado do jar.
+  # Override em runtime via: --spring.config.additional-location=file:/caminho/
+  config:
+    import: "optional:file:./config/n-stream-replay.yaml"
+  main:
+    banner-mode: "off"
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+# Ativa a ponte StatsUtils -> Micrometer do nishi-utils-spring
+# (exige app web servlet + MeterRegistry no contexto, ambos presentes).
+nishi:
+  utils:
+    stats:
+      enabled: true

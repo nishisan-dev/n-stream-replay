@@ -51,17 +51,15 @@ public final class KafkaSink implements Sink {
     static final int RECORD_OVERHEAD_BYTES = 1024;
 
     private final Producer<byte[], byte[]> producer;
-    private final String topic;
     private final int maxPayloadBytes;
 
     public KafkaSink(SinkProperties settings) {
-        this(buildProducer(settings), settings.topic(), settings.maxRequestSize() - RECORD_OVERHEAD_BYTES);
+        this(buildProducer(settings), settings.maxRequestSize() - RECORD_OVERHEAD_BYTES);
     }
 
     /** Visível para teste (injeção de producer simulado + teto da guarda). */
-    KafkaSink(Producer<byte[], byte[]> producer, String topic, int maxPayloadBytes) {
+    KafkaSink(Producer<byte[], byte[]> producer, int maxPayloadBytes) {
         this.producer = producer;
-        this.topic = topic;
         this.maxPayloadBytes = maxPayloadBytes;
     }
 
@@ -95,7 +93,8 @@ public final class KafkaSink implements Sink {
             if (isOversize(rec)) {
                 LOG.warn("Registro oversize ({} B > limite {} B) descartado para não travar o stream "
                                 + "(tópico={}, origem={}:{}@{})",
-                        rec.valueSize(), maxPayloadBytes, topic, rec.sourceTopic(), rec.partition(), rec.offset());
+                        rec.valueSize(), maxPayloadBytes, rec.destinationTopic(),
+                        rec.sourceTopic(), rec.partition(), rec.offset());
                 futures.add(null);
             } else {
                 futures.add(producer.send(toProducerRecord(rec)));
@@ -122,13 +121,12 @@ public final class KafkaSink implements Sink {
                 Throwable cause = ee.getCause();
                 if (isNonRetryable(cause)) {
                     LOG.warn("Kafka rejeitou registro em definitivo ({}) — descartado (tópico={}, origem={}:{}@{})",
-                            cause.getClass().getSimpleName(), topic,
+                            cause.getClass().getSimpleName(), batch.get(i).destinationTopic(),
                             batch.get(i).sourceTopic(), batch.get(i).partition(), batch.get(i).offset());
                     poisoned++;
                     continue;
                 }
-                LOG.warn("Falha entregando ao Kafka (tópico={}) — {} item(ns) ficam na fila",
-                        topic, n - published - poisoned, cause);
+                LOG.warn("Falha entregando ao Kafka — {} item(ns) ficam na fila", n - published - poisoned, cause);
                 break;
             }
         }
@@ -142,7 +140,7 @@ public final class KafkaSink implements Sink {
             headers.add(new RecordHeader(h.getKey(), h.getValue()));
         }
         // partition=null: o producer particiona por key (preserva ordem por chave no destino).
-        return new ProducerRecord<>(topic, null, ts, rec.key(), rec.value(), headers);
+        return new ProducerRecord<>(rec.destinationTopic(), null, ts, rec.key(), rec.value(), headers);
     }
 
     private boolean isOversize(ReplayRecord rec) {

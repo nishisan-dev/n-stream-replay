@@ -73,19 +73,21 @@ class KafkaSinkTest {
     @Test
     void entregaTodosQuandoBrokerOk() {
         ScriptedProducer producer = new ScriptedProducer();
-        try (KafkaSink sink = new KafkaSink(producer, "dest", 0)) {
+        try (KafkaSink sink = new KafkaSink(producer,0)) {
             PublishOutcome outcome = sink.publish(List.of(rec(1), rec(1), rec(1)));
             assertThat(outcome.published()).isEqualTo(3);
             assertThat(outcome.poisoned()).isZero();
             assertThat(outcome.acked()).isEqualTo(3);
             assertThat(producer.sent).hasSize(3);
+            // publica no destino do record (destinationTopic), não num tópico fixo
+            assertThat(producer.sent).extracting(ProducerRecord::topic).containsOnly("dest");
         }
     }
 
     @Test
     void descartaOversizeSemEnviar() {
         ScriptedProducer producer = new ScriptedProducer();
-        try (KafkaSink sink = new KafkaSink(producer, "dest", 10)) {  // teto de 10 bytes
+        try (KafkaSink sink = new KafkaSink(producer,10)) {  // teto de 10 bytes
             PublishOutcome outcome = sink.publish(List.of(rec(100), rec(1), rec(1)));
             assertThat(outcome.poisoned()).isEqualTo(1);     // o oversize
             assertThat(outcome.published()).isEqualTo(2);
@@ -100,7 +102,7 @@ class KafkaSinkTest {
         producer.scriptSuccess();
         producer.scriptError(new RecordTooLargeException("rejeitado em definitivo"));
         producer.scriptSuccess();
-        try (KafkaSink sink = new KafkaSink(producer, "dest", 0)) {
+        try (KafkaSink sink = new KafkaSink(producer,0)) {
             PublishOutcome outcome = sink.publish(List.of(rec(1), rec(1), rec(1)));
             assertThat(outcome.published()).isEqualTo(2);
             assertThat(outcome.poisoned()).isEqualTo(1);
@@ -114,7 +116,7 @@ class KafkaSinkTest {
         producer.scriptSuccess();
         producer.scriptError(new TimeoutException("broker fora"));   // retryable
         producer.scriptSuccess();
-        try (KafkaSink sink = new KafkaSink(producer, "dest", 0)) {
+        try (KafkaSink sink = new KafkaSink(producer,0)) {
             PublishOutcome outcome = sink.publish(List.of(rec(1), rec(1), rec(1)));
             assertThat(outcome.published()).isEqualTo(1);    // só o primeiro
             assertThat(outcome.poisoned()).isZero();

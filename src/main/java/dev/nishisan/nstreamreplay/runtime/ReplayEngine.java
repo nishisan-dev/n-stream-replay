@@ -3,7 +3,7 @@ package dev.nishisan.nstreamreplay.runtime;
 import dev.nishisan.nstreamreplay.config.NStreamReplayProperties;
 import dev.nishisan.nstreamreplay.config.SinkProperties;
 import dev.nishisan.nstreamreplay.config.SourceProperties;
-import dev.nishisan.nstreamreplay.pipeline.PipelineRegistry;
+import dev.nishisan.nstreamreplay.route.RouteTable;
 import dev.nishisan.nstreamreplay.sink.SinkChannel;
 import dev.nishisan.nstreamreplay.source.SourceConsumer;
 import dev.nishisan.nstreamreplay.stats.ReplayMetrics;
@@ -66,13 +66,14 @@ public class ReplayEngine implements SmartLifecycle {
         if (running) {
             return;
         }
-        LOG.info("ReplayEngine iniciando: {} origem(ns), {} destino(s), {} pipeline(s)",
-                properties.sources().size(), properties.sinks().size(), properties.pipelines().size());
+        LOG.info("ReplayEngine iniciando: {} origem(ns), {} destino(s), {} rota(s)",
+                properties.sources().size(), properties.sinks().size(),
+                properties.routes() == null ? 0 : properties.routes().size());
         try {
             openReferencedChannels();
-            PipelineRegistry pipelineRegistry = PipelineRegistry.build(properties.pipelines(), channels);
+            RouteTable routeTable = RouteTable.build(properties.routes(), channels);
             channels.values().forEach(SinkChannel::startForwarder);   // forwarders ANTES das origens
-            startSources(pipelineRegistry);
+            startSources(routeTable);
             startMetricsTicker();
             running = true;
             LOG.info("ReplayEngine iniciado ({} canal(is), {} origem(ns) ativa(s))",
@@ -86,10 +87,12 @@ public class ReplayEngine implements SmartLifecycle {
 
     private void openReferencedChannels() {
         Set<String> referenced = new LinkedHashSet<>();
-        properties.pipelines().forEach(p -> referenced.addAll(p.sinks()));
+        if (properties.routes() != null) {
+            properties.routes().forEach(route -> route.to().forEach(target -> referenced.add(target.sink())));
+        }
         for (SinkProperties sink : properties.sinks()) {
             if (!referenced.contains(sink.id())) {
-                LOG.warn("destino '{}' declarado mas não referenciado por nenhum pipeline — ignorado", sink.id());
+                LOG.warn("destino '{}' declarado mas não referenciado por nenhuma rota — ignorado", sink.id());
                 continue;
             }
             try {
@@ -100,14 +103,14 @@ public class ReplayEngine implements SmartLifecycle {
         }
     }
 
-    private void startSources(PipelineRegistry pipelineRegistry) {
-        Set<String> active = pipelineRegistry.activeSourceIds();
+    private void startSources(RouteTable routeTable) {
+        Set<String> active = routeTable.activeSourceIds();
         for (SourceProperties src : properties.sources()) {
             if (!active.contains(src.id())) {
-                LOG.warn("origem '{}' declarada mas não referenciada por nenhum pipeline — ignorada", src.id());
+                LOG.warn("origem '{}' declarada mas não referenciada por nenhuma rota — ignorada", src.id());
                 continue;
             }
-            SourceConsumer consumer = new SourceConsumer(src, pipelineRegistry.targetsFor(src.id()), metrics);
+            SourceConsumer consumer = new SourceConsumer(src, routeTable, metrics);
             Thread thread = new Thread(consumer, "nsr-source-" + src.id());
             sources.add(consumer);
             sourceThreads.add(thread);

@@ -64,6 +64,33 @@ class SourceConsumerTest {
     }
 
     @Test
+    void calculaOffsetLagEConsumedTotal() throws Exception {
+        TopicPartition tp = new TopicPartition("t", 0);
+        MockConsumer<byte[], byte[]> mock = new MockConsumer<>(OffsetResetStrategy.EARLIEST);
+        mock.schedulePollTask(() -> {
+            mock.rebalance(List.of(tp));
+            mock.updateBeginningOffsets(Map.of(tp, 0L));
+            mock.updateEndOffsets(Map.of(tp, 10L));            // 10 disponíveis no tópico
+            mock.addRecord(kafkaRec("t", 0, 0L, "1"));
+            mock.addRecord(kafkaRec("t", 0, 1L, "2"));         // consome 2 -> position=2
+        });
+
+        FakeSinkTarget target = new FakeSinkTarget("d", false);
+        SourceConsumer consumer = new SourceConsumer(source("s1", "t"), List.of(target), NOOP, () -> mock);
+
+        Thread t = new Thread(consumer, "lag-source");
+        t.start();
+        try {
+            await().atMost(Duration.ofSeconds(5)).until(() -> consumer.consumedTotal() == 2);
+            // endOffsets=10, position=2 => offset lag = 8
+            await().atMost(Duration.ofSeconds(5)).until(() -> consumer.offsetLag() == 8L);
+        } finally {
+            consumer.stop();
+            t.join(5_000);
+        }
+    }
+
+    @Test
     void pollLoopRealConsomeEnfileiraECommita() throws Exception {
         TopicPartition tp = new TopicPartition("t", 0);
         // Captura o offset commitado de dentro da thread do consumer (o run() fecha o

@@ -27,3 +27,8 @@ nishi:
   utils:
     stats:
       enabled: true
+
+# Relatório de stats periódico em logs/n-stream-replay-stats.log (eventos/s, offset/time lag, filas).
+nsr:
+  stats:
+    report-interval-seconds: 30

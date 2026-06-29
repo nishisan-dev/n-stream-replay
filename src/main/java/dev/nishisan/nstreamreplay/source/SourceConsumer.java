@@ -25,6 +25,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 /**
@@ -47,6 +49,16 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
     private final ReplayMetrics metrics;
     private final Supplier<Consumer<byte[], byte[]>> consumerFactory;
     private final Duration pollTimeout;
+
+    /** Intervalo de cálculo do offset lag (chamada de rede ao broker; throttled). */
+    private static final long LAG_INTERVAL_NANOS = 10_000_000_000L;
+
+    private final AtomicLong consumedTotal = new AtomicLong();
+    /** Sigma(endOffsets - position) das partições atribuídas; -1 = ainda não calculado/indisponível. */
+    private final AtomicLong offsetLag = new AtomicLong(-1L);
+    /** now - timestamp do record mais novo do último poll (ms); -1 = nenhum record ainda. */
+    private final AtomicLong ingestTimeLagMillis = new AtomicLong(-1L);
+    private long lastLagNanos = System.nanoTime() - LAG_INTERVAL_NANOS;
 
     private volatile boolean running = true;
     private volatile Consumer<byte[], byte[]> consumer;
@@ -88,9 +100,11 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
                     props.id(), props.topics(), props.groupId(), targets.size());
             while (running) {
                 ConsumerRecords<byte[], byte[]> records = c.poll(pollTimeout);
+                maybeComputeOffsetLag(c);
                 if (records.isEmpty()) {
                     continue;
                 }
+                updateTimeLag(records);
                 enqueueBatch(records);
                 commit(c);
             }
@@ -114,6 +128,7 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
     void enqueueBatch(ConsumerRecords<byte[], byte[]> records) throws IOException {
         for (ConsumerRecord<byte[], byte[]> record : records) {
             ReplayRecord rr = toReplayRecord(record);
+            consumedTotal.incrementAndGet();
             metrics.onConsumed(props.id());
             for (SinkTarget target : targets) {
                 target.offer(rr);
@@ -140,6 +155,62 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
             headers.put(h.key(), h.value());
         }
         return new ReplayRecord(r.topic(), r.partition(), r.offset(), r.timestamp(), r.key(), r.value(), headers);
+    }
+
+    /**
+     * Calcula, de forma throttled (a cada {@link #LAG_INTERVAL_NANOS}), o offset lag total
+     * (Sigma endOffsets - position) das partições atribuídas. Roda na thread de poll (o
+     * {@code KafkaConsumer} não é thread-safe). Em falha (broker indisponível), marca -1.
+     */
+    private void maybeComputeOffsetLag(Consumer<byte[], byte[]> c) {
+        long now = System.nanoTime();
+        if (now - lastLagNanos < LAG_INTERVAL_NANOS) {
+            return;
+        }
+        lastLagNanos = now;
+        try {
+            Set<TopicPartition> assigned = c.assignment();
+            if (assigned.isEmpty()) {
+                return;
+            }
+            Map<TopicPartition, Long> end = c.endOffsets(assigned);
+            long lag = 0L;
+            for (TopicPartition tp : assigned) {
+                long position = c.position(tp);
+                long endOffset = end.getOrDefault(tp, position);
+                lag += Math.max(0L, endOffset - position);
+            }
+            offsetLag.set(lag);
+        } catch (Exception e) {
+            offsetLag.set(-1L);
+        }
+    }
+
+    private void updateTimeLag(ConsumerRecords<byte[], byte[]> records) {
+        long newest = -1L;
+        for (ConsumerRecord<byte[], byte[]> record : records) {
+            if (record.timestamp() > newest) {
+                newest = record.timestamp();
+            }
+        }
+        if (newest > 0) {
+            ingestTimeLagMillis.set(Math.max(0L, System.currentTimeMillis() - newest));
+        }
+    }
+
+    /** Total acumulado de records consumidos desde o boot. */
+    public long consumedTotal() {
+        return consumedTotal.get();
+    }
+
+    /** Offset lag total das partições atribuídas; -1 se ainda não calculado/indisponível. */
+    public long offsetLag() {
+        return offsetLag.get();
+    }
+
+    /** Atraso de tempo da ingestão (ms): now - ts do record mais novo; -1 se nenhum consumido. */
+    public long ingestTimeLagMillis() {
+        return ingestTimeLagMillis.get();
     }
 
     /** Encerramento cooperativo: cessa o loop e acorda o {@code poll} via {@code wakeup}. */

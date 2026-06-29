@@ -7,6 +7,8 @@ import dev.nishisan.nstreamreplay.pipeline.PipelineRegistry;
 import dev.nishisan.nstreamreplay.sink.SinkChannel;
 import dev.nishisan.nstreamreplay.source.SourceConsumer;
 import dev.nishisan.nstreamreplay.stats.ReplayMetrics;
+import dev.nishisan.nstreamreplay.stats.StatsReporter;
+import org.springframework.beans.factory.annotation.Value;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
@@ -43,6 +45,7 @@ public class ReplayEngine implements SmartLifecycle {
 
     private final NStreamReplayProperties properties;
     private final ReplayMetrics metrics;
+    private final long statsReportIntervalSeconds;
 
     private final Map<String, SinkChannel> channels = new LinkedHashMap<>();
     private final List<SourceConsumer> sources = new ArrayList<>();
@@ -51,9 +54,11 @@ public class ReplayEngine implements SmartLifecycle {
 
     private volatile boolean running = false;
 
-    public ReplayEngine(NStreamReplayProperties properties, ReplayMetrics metrics) {
+    public ReplayEngine(NStreamReplayProperties properties, ReplayMetrics metrics,
+                        @Value("${nsr.stats.report-interval-seconds:30}") long statsReportIntervalSeconds) {
         this.properties = properties;
         this.metrics = metrics;
+        this.statsReportIntervalSeconds = statsReportIntervalSeconds;
     }
 
     @Override
@@ -118,6 +123,16 @@ public class ReplayEngine implements SmartLifecycle {
         });
         metricsTicker.scheduleAtFixedRate(this::pushMetrics,
                 METRICS_TICK_SECONDS, METRICS_TICK_SECONDS, TimeUnit.SECONDS);
+
+        StatsReporter reporter = new StatsReporter(sources, channels.values(), statsReportIntervalSeconds * 1000L);
+        metricsTicker.scheduleAtFixedRate(() -> {
+            try {
+                reporter.report();
+            } catch (RuntimeException e) {
+                LOG.warn("relatório de stats falhou", e);
+            }
+        }, statsReportIntervalSeconds, statsReportIntervalSeconds, TimeUnit.SECONDS);
+        LOG.info("relatório de stats em logs/n-stream-replay-stats.log a cada {}s", statsReportIntervalSeconds);
     }
 
     private void pushMetrics() {

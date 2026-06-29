@@ -1,0 +1,43 @@
+@startuml topology
+title n-stream-replay — Topologia (deployment)
+
+skinparam shadowing false
+skinparam rectangle {
+  BackgroundColor #FDFDFD
+  BorderColor #555555
+}
+
+node "Cluster Kafka de Origem" as srcK {
+  queue "tópico(s) de origem" as srcTopic
+}
+
+node "Host do n-stream-replay\n(java -jar fat jar, JVM 25)" as app {
+  component "SourceConsumer\n(1 thread/origem)" as src
+  component "SinkChannel\n(1 por destino)" as ch
+  database "Fila NQueue\n(disco: backlog + retry)" as q
+  component "SinkForwarder\n(1 thread/destino)" as fwd
+  component "Actuator\n/actuator/prometheus" as act
+}
+
+node "Cluster Kafka de Destino" as dstK {
+  queue "tópico de destino" as dstTopic
+}
+
+node "Prometheus" as prom
+
+srcTopic --> src : consume (kafka-clients)\nat-least-once, commit manual
+src --> q : offer (fan-out 1->N)\n+ fsync (sync-on-commit)
+q --> fwd : peek lote
+fwd --> dstTopic : publish (kafka-clients)
+fwd --> q : ack (prefixo entregue)
+ch ..> q
+ch ..> fwd
+act --> prom : scrape (pull)
+
+note bottom of q
+  Se o destino está offline, as mensagens
+  ficam aqui (durável) e são re-entregues
+  quando ele volta — sem travar origem
+  nem os demais destinos (drop-oldest no teto).
+end note
+@enduml

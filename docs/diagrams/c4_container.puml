@@ -1,0 +1,48 @@
+@startuml c4_container
+title n-stream-replay — Visão de Containers/Componentes do runtime
+
+skinparam shadowing false
+skinparam componentStyle rectangle
+skinparam rectangle {
+  BackgroundColor #FDFDFD
+  BorderColor #555555
+}
+skinparam component {
+  BackgroundColor #EAF2FB
+  BorderColor #2C3E50
+}
+skinparam database {
+  BackgroundColor #FCF3CF
+  BorderColor #7D6608
+}
+
+rectangle "Kafka de Origem" as srcKafka
+rectangle "Kafka de Destino\n(N por pipeline)" as dstKafka
+rectangle "Prometheus" as prom
+
+rectangle "n-stream-replay (Spring Boot, fat jar)" {
+  component "ReplayEngine\n(SmartLifecycle)" as engine
+  component "SourceConsumer\n(kafka-clients, 1 thread/origem)" as source
+  component "PipelineRegistry" as registry
+  component "SinkChannel\n(isolamento por destino)" as channel
+  database "DurableSinkQueue\n(NQueue: backlog + retry)" as queue
+  component "SinkForwarder\n(1 thread/destino)" as forwarder
+  component "KafkaSink\n(kafka-clients)" as sink
+  component "ReplayMetrics + StatsUtils\n(/actuator/prometheus)" as metrics
+}
+
+srcKafka --> source : consume (at-least-once)
+engine --> source : cria/inicia
+engine --> channel : cria/inicia
+source --> registry : consulta destinos
+source --> queue : offer (1->N) + sync
+channel ..> queue : possui
+channel ..> forwarder : possui
+channel ..> sink : possui
+forwarder --> queue : peek / ack
+forwarder --> sink : publish
+sink --> dstKafka : produce
+source --> metrics : consumed
+engine --> metrics : tick (gauges/destino)
+prom --> metrics : scrape (HTTP)
+@enduml

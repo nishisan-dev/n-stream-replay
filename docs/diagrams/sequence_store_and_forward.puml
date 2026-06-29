@@ -1,0 +1,45 @@
+@startuml sequence_store_and_forward
+title n-stream-replay — Sequência: ingestão (fan-out) e store-and-forward
+
+skinparam shadowing false
+actor "Kafka origem" as src
+participant "SourceConsumer\n(thread/origem)" as sc
+participant "DurableSinkQueue\n(destino A)" as qa
+participant "DurableSinkQueue\n(destino B)" as qb
+participant "SinkForwarder A" as fa
+participant "SinkForwarder B" as fb
+participant "Kafka destino A" as ka
+participant "Kafka destino B\n(offline)" as kb
+
+== Ingestão (at-least-once, sync-on-commit) ==
+src -> sc : poll() -> lote
+loop cada record
+  sc -> qa : offer(ReplayRecord)
+  sc -> qb : offer(ReplayRecord)
+end
+sc -> qa : sync() (fsync)
+sc -> qb : sync() (fsync)
+sc -> src : commitSync()  (só após durar em TODAS as filas)
+
+== Entrega independente por destino ==
+fa -> qa : peekBatch() (move backlog->retry)
+fa -> ka : publish(lote)
+ka --> fa : ok
+fa -> qa : ack() (remove prefixo entregue)
+
+note over fb, kb
+  Destino B offline: publish falha (none()).
+  Itens permanecem na retry; backoff e retry.
+  A origem e o destino A não são afetados.
+end note
+fb -> qb : peekBatch()
+fb -> kb : publish(lote)
+kb --> fb : timeout / connection refused
+fb -> fb : backoff (mantém na fila)
+
+== Destino B volta ==
+fb -> qb : peekBatch() (mesmos itens reservados)
+fb -> kb : publish(lote)
+kb --> fb : ok
+fb -> qb : ack()
+@enduml

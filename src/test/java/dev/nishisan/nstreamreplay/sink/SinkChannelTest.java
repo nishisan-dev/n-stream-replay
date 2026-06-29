@@ -19,7 +19,7 @@ class SinkChannelTest {
 
     private static ReplayRecord rec(int n) {
         return new ReplayRecord("t", 0, n, n, null,
-                String.valueOf(n).getBytes(StandardCharsets.UTF_8), Map.of());
+                String.valueOf(n).getBytes(StandardCharsets.UTF_8), Map.of(), "t");
     }
 
     private static SinkChannel channel(Path tmp, FakeSink sink, Durability durability) throws Exception {

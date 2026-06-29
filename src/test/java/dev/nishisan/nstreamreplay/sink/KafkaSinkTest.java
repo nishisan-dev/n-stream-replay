@@ -67,7 +67,7 @@ class KafkaSinkTest {
     private static ReplayRecord rec(int valueBytes) {
         byte[] value = new byte[valueBytes];
         return new ReplayRecord("src", 0, valueBytes, 1L,
-                "k".getBytes(StandardCharsets.UTF_8), value, Map.of());
+                "k".getBytes(StandardCharsets.UTF_8), value, Map.of(), "dest");
     }
 
     @Test

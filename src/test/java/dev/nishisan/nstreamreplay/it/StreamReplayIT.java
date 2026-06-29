@@ -189,7 +189,7 @@ class StreamReplayIT {
         for (int i = 0; i < n; i++) {
             offline.offer(new ReplayRecord(topic, 0, i, i,
                     ("k" + i).getBytes(StandardCharsets.UTF_8),
-                    ("v" + i).getBytes(StandardCharsets.UTF_8), Map.of()));
+                    ("v" + i).getBytes(StandardCharsets.UTF_8), Map.of(), topic));
         }
         offline.sync();
         offline.close();   // nada entregue; 15 registros persistidos em disco

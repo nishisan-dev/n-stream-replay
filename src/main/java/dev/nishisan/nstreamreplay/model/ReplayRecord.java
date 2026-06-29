@@ -6,19 +6,21 @@ import java.util.Arrays;
 import java.util.Map;
 
 /**
- * Registro trafegado da origem para os destinos, persistido nas filas duráveis ({@code NQueue}
+ * Registro trafegado da origem para um destino, persistido na fila durável ({@code NQueue}
  * serializa via {@code ObjectOutputStream}, por isso {@link Serializable}). Não há transformação:
- * {@link #key} e {@link #value} são os bytes originais do Kafka. Carrega a <b>proveniência</b>
- * da origem ({@link #sourceTopic}/{@link #partition}/{@link #offset}) — barato e suficiente para
- * uma deduplicação posterior (o MVP é at-least-once) e para diagnóstico.
+ * {@link #key} e {@link #value} são os bytes originais do Kafka. Carrega a <b>proveniência</b> da
+ * origem ({@link #sourceTopic}/{@link #partition}/{@link #offset}) e o <b>tópico de destino</b>
+ * resolvido pela rota ({@link #destinationTopic}) — uma fila por sink pode conter registros para
+ * tópicos de destino diferentes, e o {@code KafkaSink} publica em {@link #destinationTopic}.
  *
- * @param sourceTopic tópico de origem
- * @param partition   partição de origem
- * @param offset      offset de origem
- * @param timestamp   timestamp do record na origem (epoch ms)
- * @param key         chave (pode ser {@code null})
- * @param value       valor/payload (pode ser {@code null} — tombstone)
- * @param headers     headers do record (nunca {@code null}; cópia imutável)
+ * @param sourceTopic      tópico de origem
+ * @param partition        partição de origem
+ * @param offset           offset de origem
+ * @param timestamp        timestamp do record na origem (epoch ms)
+ * @param key              chave (pode ser {@code null})
+ * @param value            valor/payload (pode ser {@code null} — tombstone)
+ * @param headers          headers do record (nunca {@code null}; cópia imutável)
+ * @param destinationTopic tópico de destino resolvido pela rota
  */
 public record ReplayRecord(
         String sourceTopic,
@@ -27,10 +29,11 @@ public record ReplayRecord(
         long timestamp,
         byte[] key,
         byte[] value,
-        Map<String, byte[]> headers) implements Serializable {
+        Map<String, byte[]> headers,
+        String destinationTopic) implements Serializable {
 
     @Serial
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
 
     public ReplayRecord {
         headers = (headers == null) ? Map.of() : Map.copyOf(headers);
@@ -48,13 +51,15 @@ public record ReplayRecord(
             return true;
         }
         if (!(o instanceof ReplayRecord(
-                String topic, int part, long off, long ts, byte[] k, byte[] v, Map<String, byte[]> h))) {
+                String topic, int part, long off, long ts,
+                byte[] k, byte[] v, Map<String, byte[]> h, String destTopic))) {
             return false;
         }
         if (partition != part || offset != off || timestamp != ts) {
             return false;
         }
-        if (!java.util.Objects.equals(sourceTopic, topic)) {
+        if (!java.util.Objects.equals(sourceTopic, topic)
+                || !java.util.Objects.equals(destinationTopic, destTopic)) {
             return false;
         }
         if (!Arrays.equals(key, k) || !Arrays.equals(value, v)) {
@@ -65,7 +70,7 @@ public record ReplayRecord(
 
     @Override
     public int hashCode() {
-        int result = java.util.Objects.hash(sourceTopic, partition, offset, timestamp);
+        int result = java.util.Objects.hash(sourceTopic, partition, offset, timestamp, destinationTopic);
         result = 31 * result + Arrays.hashCode(key);
         result = 31 * result + Arrays.hashCode(value);
         result = 31 * result + headers.size();

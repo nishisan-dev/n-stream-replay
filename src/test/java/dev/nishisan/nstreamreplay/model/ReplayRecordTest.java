@@ -32,12 +32,13 @@ class ReplayRecordTest {
                 "orders.in", 3, 42L, 1_700_000_000_000L,
                 "k1".getBytes(StandardCharsets.UTF_8),
                 "payload".getBytes(StandardCharsets.UTF_8),
-                headers);
+                headers, "orders.mirror");
 
         ReplayRecord restored = roundTrip(original);
 
         assertThat(restored).isEqualTo(original);
         assertThat(restored.sourceTopic()).isEqualTo("orders.in");
+        assertThat(restored.destinationTopic()).isEqualTo("orders.mirror");
         assertThat(restored.partition()).isEqualTo(3);
         assertThat(restored.offset()).isEqualTo(42L);
         assertThat(restored.value()).asString(StandardCharsets.UTF_8).isEqualTo("payload");
@@ -47,7 +48,7 @@ class ReplayRecordTest {
     @Test
     void suportaKeyEValueNulosTombstone() throws Exception {
         ReplayRecord tombstone = new ReplayRecord(
-                "t", 0, 1L, 0L, "k".getBytes(StandardCharsets.UTF_8), null, null);
+                "t", 0, 1L, 0L, "k".getBytes(StandardCharsets.UTF_8), null, null, "t.out");
 
         ReplayRecord restored = roundTrip(tombstone);
 
@@ -60,9 +61,9 @@ class ReplayRecordTest {
     @Test
     void igualdadePorConteudoIgnoraIdentidadeDeArrays() {
         ReplayRecord a = new ReplayRecord("t", 0, 1L, 9L,
-                new byte[]{1, 2}, new byte[]{3, 4}, Map.of());
+                new byte[]{1, 2}, new byte[]{3, 4}, Map.of(), "t.out");
         ReplayRecord b = new ReplayRecord("t", 0, 1L, 9L,
-                new byte[]{1, 2}, new byte[]{3, 4}, Map.of());
+                new byte[]{1, 2}, new byte[]{3, 4}, Map.of(), "t.out");
 
         assertThat(a).isEqualTo(b);
         assertThat(a.hashCode()).isEqualTo(b.hashCode());

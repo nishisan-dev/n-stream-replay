@@ -154,7 +154,9 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
         for (Header h : r.headers()) {
             headers.put(h.key(), h.value());
         }
-        return new ReplayRecord(r.topic(), r.partition(), r.offset(), r.timestamp(), r.key(), r.value(), headers);
+        // Interino (Task 1): destino = tópico de origem; o roteamento por rota entra na Task 5.
+        return new ReplayRecord(r.topic(), r.partition(), r.offset(), r.timestamp(),
+                r.key(), r.value(), headers, r.topic());
     }
 
     /**

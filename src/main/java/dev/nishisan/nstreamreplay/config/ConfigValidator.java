@@ -3,6 +3,7 @@ package dev.nishisan.nstreamreplay.config;
 import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
 
@@ -30,9 +31,10 @@ public class ConfigValidator {
     public static void validate(NStreamReplayProperties props) {
         Set<String> sourceIds = uniqueOrThrow(props.sources(), SourceProperties::id, "source");
         Set<String> sinkIds = uniqueOrThrow(props.sinks(), SinkProperties::id, "sink");
-        uniqueOrThrow(props.pipelines(), PipelineProperties::id, "pipeline");
 
-        for (PipelineProperties pipeline : props.pipelines()) {
+        List<PipelineProperties> pipelines = props.pipelines() == null ? List.of() : props.pipelines();
+        uniqueOrThrow(pipelines, PipelineProperties::id, "pipeline");
+        for (PipelineProperties pipeline : pipelines) {
             if (!sourceIds.contains(pipeline.source())) {
                 throw new IllegalStateException(
                         "pipeline '" + pipeline.id() + "' referencia source inexistente: " + pipeline.source());
@@ -41,6 +43,21 @@ public class ConfigValidator {
                 if (!sinkIds.contains(sinkRef)) {
                     throw new IllegalStateException(
                             "pipeline '" + pipeline.id() + "' referencia sink inexistente: " + sinkRef);
+                }
+            }
+        }
+
+        List<RouteProperties> routes = props.routes() == null ? List.of() : props.routes();
+        uniqueOrThrow(routes, RouteProperties::id, "route");
+        for (RouteProperties route : routes) {
+            if (!sourceIds.contains(route.source())) {
+                throw new IllegalStateException(
+                        "rota '" + route.id() + "' referencia source inexistente: " + route.source());
+            }
+            for (RouteTarget target : route.to()) {
+                if (!sinkIds.contains(target.sink())) {
+                    throw new IllegalStateException(
+                            "rota '" + route.id() + "' referencia sink inexistente: " + target.sink());
                 }
             }
         }

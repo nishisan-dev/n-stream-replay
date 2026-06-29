@@ -101,6 +101,27 @@
                     </execution>
                 </executions>
             </plugin>
+            <!-- ITs (*IT.java, Testcontainers) rodam em `mvn verify`; `mvn test` fica leve (unit). -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <!-- Daemon Docker recente (API mínima 1.40) recusa o default do docker-java
+                         (1.32). O docker-java lê a versão da API pela system property api.version;
+                         fixá-la em uma versão suportada destrava o Testcontainers. -->
+                    <systemPropertyVariables>
+                        <api.version>1.43</api.version>
+                    </systemPropertyVariables>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 

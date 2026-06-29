@@ -17,13 +17,13 @@ skinparam database {
 }
 
 rectangle "Kafka de Origem" as srcKafka
-rectangle "Kafka de Destino\n(N por pipeline)" as dstKafka
+rectangle "Kafka de Destino\n(tópico vem da rota)" as dstKafka
 rectangle "Prometheus" as prom
 
 rectangle "n-stream-replay (Spring Boot, fat jar)" {
   component "ReplayEngine\n(SmartLifecycle)" as engine
   component "SourceConsumer\n(kafka-clients, 1 thread/origem)" as source
-  component "PipelineRegistry" as registry
+  component "RouteTable\n(tópico -> alvos)" as registry
   component "SinkChannel\n(isolamento por destino)" as channel
   database "DurableSinkQueue\n(NQueue: backlog + retry)" as queue
   component "SinkForwarder\n(1 thread/destino)" as forwarder

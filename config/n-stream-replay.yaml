@@ -1,19 +1,19 @@
 # ════════════════════════════════════════════════════════════════════════════
-#  n-stream-replay — configuração de relay Kafka store-and-forward
+#  n-stream-replay — configuração de relay Kafka store-and-forward (modelo de ROTAS)
 #
-#  Modelo: ORIGENS (sources) e DESTINOS (sinks) são listas planas com `id`.
-#  Um PIPELINE amarra 1 origem a N destinos por referência de id (fan-out 1->N).
-#  Cada DESTINO tem sua própria fila durável (NQueue) em `queue.basePath/<id>/`.
-#  Se um destino fica offline, suas mensagens ficam na fila e são re-entregues
-#  quando ele volta — sem travar a origem nem os demais destinos.
+#  Modelo (v2): ORIGENS (sources) e DESTINOS (sinks) são conexões puras (sem tópico
+#  fixo). As ROTAS amarram um tópico de origem a N alvos {sink, toTopic?}:
+#    - toTopic presente: renomeia no destino;  toTopic ausente: preserva o nome de origem.
+#  Os tópicos consumidos por uma origem são a união dos `fromTopic` de suas rotas.
+#  Cada DESTINO tem sua própria fila durável (NQueue) em `queue.basePath/<id>/`; se um
+#  destino fica offline, suas mensagens ficam na fila e são re-entregues quando ele volta.
 # ════════════════════════════════════════════════════════════════════════════
 nstreamreplay:
 
   # ── ORIGENS (consumers Kafka; kafka-clients cru, commit manual) ─────────────
   sources:
-    - id: orders-src                       # único; vira referência e nome de métrica
+    - id: orders-src                       # único; referência em rotas e nome de métrica
       bootstrapServers: "localhost:9092"
-      topics: [ "orders.in" ]              # 1..N tópicos consumidos por esta origem
       groupId: "n-stream-replay.orders"    # consumer group (enable.auto.commit=false)
       clientId: "nsr-orders-src"           # opcional (default = id)
       autoOffsetReset: latest              # earliest | latest | none
@@ -21,11 +21,10 @@ nstreamreplay:
       pollTimeoutMs: 1000
       extraProps: {}                       # passthrough cru p/ o KafkaConsumer (SASL/TLS...)
 
-  # ── DESTINOS (producers Kafka + fila durável por destino) ───────────────────
+  # ── DESTINOS (producers Kafka + fila durável; sem tópico fixo) ──────────────
   sinks:
     - id: dc2-mirror
       bootstrapServers: "localhost:9092"
-      topic: "orders.mirror"               # 1 tópico de destino por sink
       acks: all                            # 0 | 1 | all
       lingerMs: 50
       compressionType: lz4                 # none | gzip | snappy | lz4 | zstd
@@ -40,8 +39,11 @@ nstreamreplay:
         batchSize: 256                     # lote drenado por iteração do forwarder
         forwarderRetryBackoffMs: 1000      # backoff quando o broker do destino está fora
 
-  # ── PIPELINES (amarram 1 origem a N destinos por id) ────────────────────────
-  pipelines:
-    - id: orders-fanout
-      source: orders-src                   # ref a sources[].id
-      sinks: [ dc2-mirror ]                # ref a sinks[].id (fan-out 1->N)
+  # ── ROTAS (tópico de origem -> N alvos {sink, toTopic?}) ────────────────────
+  routes:
+    - id: orders-mirror
+      source: orders-src
+      fromTopic: orders.in                 # tópico consumido na origem
+      to:
+        - { sink: dc2-mirror, toTopic: orders.mirror }   # renomeia no destino
+        # - { sink: dc2-mirror }                          # (toTopic ausente = preserva "orders.in")

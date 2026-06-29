@@ -1,13 +1,20 @@
 # n-stream-replay
 
-Relay **Kafka store-and-forward**: declaram-se **origens** (sources) e **destinos** (sinks) Kafka, e **pipelines** que amarram **1 origem → N destinos**. Sem transformação de mensagem e sem rate-limit (MVP).
+Relay **Kafka store-and-forward** com **roteamento por tópico**: declaram-se **origens** (sources) e **destinos** (sinks) como conexões puras, e **rotas** que mapeiam um **tópico de origem → N alvos `{sink, toTopic?}`** (de-para, fan-out, merge, espelho). Sem transformação de mensagem e sem rate-limit.
 
 Cada **destino** possui uma **fila durável (NQueue, em disco)** própria. Se o destino fica offline, as mensagens dele ficam na fila e são **re-entregues quando ele volta** — sem travar a origem nem os demais destinos.
 
 ```
-origem  ──►  pipeline (resolve destinos)  ──►  fila-NQueue (por destino)  ──►  destino
-                                          └──►  fila-NQueue (por destino)  ──►  destino
+                       ┌─ rota: orders.in → {dc2-mirror, toTopic=orders.mirror}
+orders.in (orders-src) ┤
+                       └─ rota: returns.in → {analytics}            (toTopic ausente = preserva)
+   origem (consome a união dos fromTopic) ──► fila-NQueue (por destino) ──► destino (no tópico da rota)
 ```
+
+- **de-para:** tópico A → sink X, tópico B → sink Y (rotas distintas).
+- **fan-out:** uma rota com vários `to` (1 tópico → N destinos).
+- **merge:** duas rotas com o mesmo `{sink, toTopic}` (N tópicos → 1 destino).
+- **espelho:** `toTopic` omitido → o destino preserva o nome do tópico de origem.
 
 ## Stack
 - Java 25, Spring Boot 3.5.6 (web servlet, apenas para expor métricas)
@@ -33,7 +40,7 @@ mvn clean package          # gera o fat jar executável em target/n-stream-repla
 java -jar target/n-stream-replay-*.jar --spring.config.additional-location=file:./config/
 ```
 
-- Configuração de app: [`config/n-stream-replay.yaml`](config/n-stream-replay.yaml) (sources/sinks/pipelines).
+- Configuração de app: [`config/n-stream-replay.yaml`](config/n-stream-replay.yaml) (sources/sinks/routes).
 - Métricas: `GET http://localhost:8080/actuator/prometheus` (séries `nstreamreplay_*`).
 - Health: `GET http://localhost:8080/actuator/health`.
 

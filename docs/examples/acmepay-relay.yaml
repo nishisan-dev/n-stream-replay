@@ -1,24 +1,21 @@
 # ════════════════════════════════════════════════════════════════════════════
-#  Exemplo de mundo real — AcmePay
-#  Espelhamento de eventos do DC primário (São Paulo) para DR, analytics,
-#  fraude e arquivamento, com políticas de fila distintas por destino.
+#  Exemplo de mundo real — AcmePay (modelo de ROTAS, v2)
+#  orders.events  -> DR-Rio (preserva o nome)        + analytics (renomeia p/ orders.raw)
+#  payments.events-> fraude (preserva)               + arquivamento (renomeia p/ payments.archive)
 #
-#  Uso: copie para ./config/n-stream-replay.yaml ao lado do fat jar
-#       (ou aponte com --spring.config.additional-location=file:/etc/nsr/).
+#  Uso: copie para ./config/n-stream-replay.yaml ao lado do fat jar.
 #  Segredos via variáveis de ambiente — NUNCA versione senhas no YAML.
 # ════════════════════════════════════════════════════════════════════════════
 nstreamreplay:
 
-  # ── ORIGENS (clusters do DC primário, São Paulo) ───────────────────────────
+  # ── ORIGENS (clusters do DC primário, São Paulo) — sem tópico fixo ──────────
   sources:
     - id: orders-sp
       bootstrapServers: "kafka-sp-1:9093,kafka-sp-2:9093,kafka-sp-3:9093"
-      topics: [ "orders.events" ]
       groupId: "n-stream-replay.orders-sp"
       clientId: "nsr-orders-sp"
       autoOffsetReset: latest
       maxPollRecords: 1000
-      pollTimeoutMs: 1000
       extraProps:
         security.protocol: SASL_SSL
         sasl.mechanism: SCRAM-SHA-512
@@ -27,7 +24,6 @@ nstreamreplay:
 
     - id: payments-sp
       bootstrapServers: "kafka-sp-1:9093,kafka-sp-2:9093,kafka-sp-3:9093"
-      topics: [ "payments.events" ]
       groupId: "n-stream-replay.payments-sp"
       autoOffsetReset: latest
       maxPollRecords: 1000
@@ -36,13 +32,11 @@ nstreamreplay:
         sasl.mechanism: SCRAM-SHA-512
         sasl.jaas.config: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"nsr\" password=\"${NSR_SP_PASSWORD}\";"
 
-  # ── DESTINOS (políticas de fila por criticidade) ───────────────────────────
+  # ── DESTINOS (conexões + fila durável; políticas por criticidade) ───────────
   sinks:
-    # Disaster Recovery (Rio): prioridade ZERO PERDA. Acumula no disco enquanto
-    # o link inter-DC estiver fora; nunca expira por tempo; fsync por registro.
+    # Disaster Recovery (Rio): prioridade ZERO PERDA.
     - id: dr-rio
       bootstrapServers: "kafka-rio-1:9093,kafka-rio-2:9093"
-      topic: "orders.events"
       acks: all
       compressionType: zstd
       maxRequestSize: 2097152
@@ -52,31 +46,29 @@ nstreamreplay:
         sasl.jaas.config: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"nsr\" password=\"${NSR_RIO_PASSWORD}\";"
       queue:
         basePath: "/var/lib/nsr/queues"
-        maxDepth: 5000000          # buffer grande p/ tolerar outage longo do link DR
-        retentionTime: 0s          # nunca descarta por tempo (DR não pode perder)
+        maxDepth: 5000000
+        retentionTime: 0s              # nunca descarta por tempo (DR não pode perder)
         durability: per-record-fsync   # sem perda mesmo em crash de máquina
-        onWriteError: halt         # disco cheio => PARA a origem (parar > perder)
+        onWriteError: halt             # disco cheio => PARA a origem (parar > perder)
         batchSize: 500
         forwarderRetryBackoffMs: 2000
 
-    # Analytics: best-effort. Limitado por tamanho e tempo, rápido, isolado.
+    # Analytics: best-effort.
     - id: analytics
       bootstrapServers: "kafka-analytics:9092"
-      topic: "orders.raw"
       acks: "1"
       compressionType: lz4
       queue:
         basePath: "/var/lib/nsr/queues"
         maxDepth: 200000
-        retentionTime: 12h         # descarta o não entregue com mais de 12h
-        durability: os-managed     # mais rápido; aceita perda na cauda em crash
-        onWriteError: drop         # isolamento: nunca trava a origem
+        retentionTime: 12h
+        durability: os-managed
+        onWriteError: drop
         batchSize: 1000
 
-    # Fraude: importante, tolera duplicatas; retenção média.
+    # Fraude: importante, tolera duplicatas.
     - id: fraud
       bootstrapServers: "kafka-fraud-1:9093,kafka-fraud-2:9093"
-      topic: "payments.events"
       acks: all
       compressionType: zstd
       extraProps:
@@ -93,7 +85,6 @@ nstreamreplay:
     # Arquivamento frio: alto volume, retenção longa.
     - id: cold-archive
       bootstrapServers: "kafka-archive:9092"
-      topic: "payments.archive"
       acks: "1"
       compressionType: zstd
       queue:
@@ -102,11 +93,17 @@ nstreamreplay:
         retentionTime: 48h
         durability: os-managed
 
-  # ── PIPELINES (amarram 1 origem a N destinos) ──────────────────────────────
-  pipelines:
-    - id: orders-mirror
+  # ── ROTAS (de-para por tópico) ──────────────────────────────────────────────
+  routes:
+    - id: orders-fanout
       source: orders-sp
-      sinks: [ dr-rio, analytics ]      # orders -> DR (zero perda) + analytics (best-effort)
+      fromTopic: orders.events
+      to:
+        - { sink: dr-rio }                          # preserva => orders.events no Rio (DR)
+        - { sink: analytics, toTopic: orders.raw }  # renomeia para analytics
     - id: payments-fanout
       source: payments-sp
-      sinks: [ fraud, cold-archive ]    # payments -> fraude + arquivamento
+      fromTopic: payments.events
+      to:
+        - { sink: fraud }                              # preserva => payments.events
+        - { sink: cold-archive, toTopic: payments.archive }

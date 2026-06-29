@@ -42,4 +42,6 @@ java -jar target/n-stream-replay-*.jar --spring.config.additional-location=file:
 - **Durabilidade `sync-on-commit` (default):** o offset da origem só é commitado depois que o lote foi gravado e sincronizado (`fsync`) em todas as filas-destino.
 - **Bounded drop-oldest:** cada fila é limitada por `maxDepth` (contagem) e/ou `retentionTime` (tempo); ao estourar, os registros **mais antigos não entregues são descartados** (perda intencional, contabilizada em `dropped`/`expired`).
 
-Detalhes de arquitetura em [`docs/architecture.md`](docs/architecture.md).
+## Documentação
+- [Arquitetura](docs/architecture.md) — componentes, garantias de corretude, métricas.
+- [Exemplo de uso (AcmePay)](docs/usage-example.md) — cenário real de espelhamento entre datacenters, com [config pronta](docs/examples/acmepay-relay.yaml).

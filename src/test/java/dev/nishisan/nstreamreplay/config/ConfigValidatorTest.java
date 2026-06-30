@@ -14,7 +14,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ConfigValidatorTest {
 
     private static SourceProperties src(String id) {
-        return new SourceProperties(id, "b:9092", "g", null, "latest", 500, 1000L, Map.of());
+        return new SourceProperties(id, "b:9092", "g", null, "latest", 500, 1000L, 0L, Map.of());
     }
 
     private static QueueProperties queue() {
@@ -106,7 +106,7 @@ class ConfigValidatorTest {
     void resolvedClientIdUsaIdQuandoAusente() {
         assertThat(src("s1").resolvedClientId()).isEqualTo("s1");
         SourceProperties comClient = new SourceProperties(
-                "s1", "b:9092", "g", "cli-x", "latest", 500, 1000L, Map.of());
+                "s1", "b:9092", "g", "cli-x", "latest", 500, 1000L, 0L, Map.of());
         assertThat(comClient.resolvedClientId()).isEqualTo("cli-x");
     }
 }

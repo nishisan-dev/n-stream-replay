@@ -24,7 +24,7 @@ A aplicação é um **Spring Boot web servlet** apenas para expor métricas em `
 | Componente | Papel |
 |---|---|
 | `ReplayEngine` (`SmartLifecycle`) | Constrói e possui as instâncias dinâmicas; start/stop ordenado (forwarders **antes** das origens); tick de métricas. |
-| `SourceConsumer` (1 thread/origem) | `KafkaConsumer` cru, `enable.auto.commit=false`; assina a união dos `fromTopic`; **roteia cada record por tópico** (resolve destino + `destinationTopic`); group-commit (sync) **antes** do `commitSync`. |
+| `SourceConsumer` (1 thread/origem) | `KafkaConsumer` cru, `enable.auto.commit=false`; assina a união dos `fromTopic`; **roteia cada record por tópico** (resolve destino + `destinationTopic`); rate limit opcional via `ConsumeRateLimiter` (`maxConsumeRatePerSec`); group-commit (sync) **antes** do `commitSync`. |
 | `RouteTable` | Resolve, no boot, **origem → (tópico → alvos)**; alvo = `{sink, toTopic?}` (toTopic ausente = preserva). |
 | `SinkChannel` (1 por destino) | Unidade de **isolamento**: agrega fila + producer + forwarder + thread. |
 | `DurableSinkQueue` | Dupla-fila `backlog`+`retry` sob lock; drop-oldest por contagem/tempo; at-least-once. |

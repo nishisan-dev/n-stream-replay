@@ -30,7 +30,7 @@ class SourceConsumerTest {
     private static final ReplayMetrics NOOP = new ReplayMetrics((dev.nishisan.utils.stats.StatsUtils) null);
 
     private static SourceProperties source(String id) {
-        return new SourceProperties(id, "ignored:9092", "g", null, "earliest", 500, 200L, Map.of());
+        return new SourceProperties(id, "ignored:9092", "g", null, "earliest", 500, 200L, 0L, Map.of());
     }
 
     /** RouteTable com uma rota: sourceId/fromTopic -> targets (toTopic null = preserva). */

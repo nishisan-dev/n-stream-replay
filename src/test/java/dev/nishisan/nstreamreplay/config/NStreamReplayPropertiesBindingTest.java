@@ -45,6 +45,7 @@ class NStreamReplayPropertiesBindingTest {
                       autoOffsetReset: earliest
                       maxPollRecords: 250
                       pollTimeoutMs: 750
+                      maxConsumeRatePerSec: 1500
                       extraProps:
                         security.protocol: SASL_SSL
                   sinks:
@@ -78,6 +79,7 @@ class NStreamReplayPropertiesBindingTest {
         assertThat(s.autoOffsetReset()).isEqualTo("earliest");
         assertThat(s.maxPollRecords()).isEqualTo(250);
         assertThat(s.pollTimeoutMs()).isEqualTo(750L);
+        assertThat(s.maxConsumeRatePerSec()).isEqualTo(1500L);
         assertThat(s.resolvedClientId()).isEqualTo("cli-1");
         assertThat(s.extraProps()).containsEntry("security.protocol", "SASL_SSL");
 
@@ -119,6 +121,7 @@ class NStreamReplayPropertiesBindingTest {
         assertThat(s.autoOffsetReset()).isEqualTo("latest");
         assertThat(s.maxPollRecords()).isEqualTo(500);
         assertThat(s.pollTimeoutMs()).isEqualTo(1000L);
+        assertThat(s.maxConsumeRatePerSec()).isZero();   // default = ilimitado
         assertThat(s.resolvedClientId()).isEqualTo("s1");
         assertThat(s.extraProps()).isEmpty();
 

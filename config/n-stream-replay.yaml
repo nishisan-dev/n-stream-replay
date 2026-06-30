@@ -19,6 +19,7 @@ nstreamreplay:
       autoOffsetReset: latest              # earliest | latest | none
       maxPollRecords: 500
       pollTimeoutMs: 1000
+      maxConsumeRatePerSec: 0              # teto de consumo em registros/s (0 = ilimitado)
       extraProps: {}                       # passthrough cru p/ o KafkaConsumer (SASL/TLS...)
 
   # ── DESTINOS (producers Kafka + fila durável; sem tópico fixo) ──────────────

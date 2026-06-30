@@ -15,6 +15,7 @@ orders.in (orders-src) ┤
 - **fan-out:** uma rota com vários `to` (1 tópico → N destinos).
 - **merge:** duas rotas com o mesmo `{sink, toTopic}` (N tópicos → 1 destino).
 - **espelho:** `toTopic` omitido → o destino preserva o nome do tópico de origem.
+- **rate limit por origem:** `maxConsumeRatePerSec` (registros/s; `0` = ilimitado) limita a taxa de consumo da origem.
 
 ## Stack
 - Java 25, Spring Boot 3.5.6 (web servlet, apenas para expor métricas)

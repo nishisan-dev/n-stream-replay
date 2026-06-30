@@ -109,7 +109,7 @@ class StreamReplayIT {
 
     private SourceConsumer startSource(String id, RouteTable routes) {
         SourceProperties props = new SourceProperties(id, bootstrap(),
-                "grp-" + UUID.randomUUID(), null, "earliest", 500, 400L, Map.of());
+                "grp-" + UUID.randomUUID(), null, "earliest", 500, 400L, 0L, Map.of());
         SourceConsumer src = new SourceConsumer(props, routes, NOOP);
         Thread t = new Thread(src, id + "-thread");
         t.setDaemon(true);

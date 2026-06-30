@@ -3,6 +3,7 @@ package dev.nishisan.nstreamreplay.config;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.PositiveOrZero;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
 import java.util.Map;
@@ -19,6 +20,7 @@ import java.util.Map;
  * @param autoOffsetReset {@code earliest | latest | none}
  * @param maxPollRecords  {@code max.poll.records}
  * @param pollTimeoutMs   timeout do {@code consumer.poll(...)} em ms
+ * @param maxConsumeRatePerSec teto de consumo em registros/s ({@code 0} = ilimitado)
  * @param extraProps      passthrough cru para o {@code KafkaConsumer} (SASL/TLS, etc.)
  */
 public record SourceProperties(
@@ -29,6 +31,7 @@ public record SourceProperties(
         @Pattern(regexp = "earliest|latest|none") @DefaultValue("latest") String autoOffsetReset,
         @Positive @DefaultValue("500") int maxPollRecords,
         @Positive @DefaultValue("1000") long pollTimeoutMs,
+        @PositiveOrZero @DefaultValue("0") long maxConsumeRatePerSec,
         @DefaultValue Map<String, String> extraProps) {
 
     /** Client id efetivo: o configurado ou, na ausência, o próprio {@link #id}. */

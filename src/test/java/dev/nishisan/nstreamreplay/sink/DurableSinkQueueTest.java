@@ -118,6 +118,27 @@ class DurableSinkQueueTest {
     }
 
     @Test
+    void ackEmLoteConfirmaPrefixoContiguoEmUmaChamada(@TempDir Path tmp) throws Exception {
+        try (DurableSinkQueue q = DurableSinkQueue.open("s", cfg(tmp, 100, Duration.ZERO, 10))) {
+            for (int i = 1; i <= 5; i++) {
+                q.offer(rec(i));
+            }
+            List<ReplayRecord> batch = q.peekBatch();
+            assertThat(batch).hasSize(5);
+
+            q.ack(3);   // confirma 1,2,3 de uma vez (uma seção crítica)
+            assertThat(q.depth()).isEqualTo(2);
+            // restante reservado, em ordem.
+            assertThat(q.peekBatch().stream().map(DurableSinkQueueTest::val)).containsExactly(4, 5);
+
+            q.ack(0);   // no-op
+            assertThat(q.depth()).isEqualTo(2);
+            q.ack(2);
+            assertThat(q.depth()).isZero();
+        }
+    }
+
+    @Test
     void recuperaBacklogDoDiscoAposReabrir(@TempDir Path tmp) throws Exception {
         QueueProperties cfg = cfg(tmp, 100, Duration.ZERO, 10);
         try (DurableSinkQueue q = DurableSinkQueue.open("s", cfg)) {

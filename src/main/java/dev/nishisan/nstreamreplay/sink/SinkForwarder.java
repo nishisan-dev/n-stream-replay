@@ -91,9 +91,7 @@ public final class SinkForwarder implements Runnable {
             outcome = PublishOutcome.none();
         }
         int acked = outcome.acked();
-        for (int i = 0; i < acked; i++) {
-            queue.ack();
-        }
+        queue.ack(acked);   // confirma o prefixo entregue numa única seção crítica (retryLock)
         if (outcome.published() > 0) {
             publishedTotal.addAndGet(outcome.published());
         }

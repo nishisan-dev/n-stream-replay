@@ -21,9 +21,15 @@ import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Fila durável store-and-forward de um destino, no padrão <b>dupla-fila</b> ({@code backlog}
- * + {@code retry}) sob um único {@link ReentrantLock} externo — espelha o
- * {@code MetricStreamQueue} do ape-probe, adaptado para drop-oldest por contagem <i>e</i> por
- * tempo, e at-least-once.
+ * + {@code retry}) — espelha o {@code MetricStreamQueue} do ape-probe, adaptado para drop-oldest
+ * por contagem <i>e</i> por tempo, e at-least-once.
+ *
+ * <p><b>Locks separados por fila:</b> a {@code NQueue} já é thread-safe internamente; o
+ * {@link #backlogLock} serializa as operações de {@code backlog} (offer da origem, poll do move)
+ * e o {@link #retryLock} as de {@code retry} (move, ack do forwarder). Com isso a origem
+ * ({@code offer}) e a confirmação ({@code ack}) <b>deixam de contender</b> — só
+ * {@link #peekBatch()}, {@link #sync()} e {@link #sweepAndReconcile()} tocam as duas, sempre na
+ * ordem {@code backlog -> retry} (evita deadlock).
  *
  * <p><b>Fluxo:</b> a origem {@link #offer(ReplayRecord)} no {@code backlog} (nunca bloqueia;
  * drop-oldest ao atingir {@code maxDepth}). O forwarder {@link #peekBatch()} reserva um lote
@@ -55,7 +61,8 @@ public final class DurableSinkQueue implements Closeable {
     private final int batchSize;
     private final boolean retentionActive;
 
-    private final ReentrantLock lock = new ReentrantLock();
+    private final ReentrantLock backlogLock = new ReentrantLock();
+    private final ReentrantLock retryLock = new ReentrantLock();
     private final AtomicLong pending = new AtomicLong();
     private final AtomicLong dropped = new AtomicLong();
     private final AtomicLong expired = new AtomicLong();
@@ -116,7 +123,7 @@ public final class DurableSinkQueue implements Closeable {
      */
     public boolean offer(ReplayRecord record) throws IOException {
         ensureOpen();
-        lock.lock();
+        backlogLock.lock();
         try {
             if (pending.get() >= maxDepth) {
                 Optional<ReplayRecord> evicted = backlog.poll(NONBLOCKING, TimeUnit.MILLISECONDS);
@@ -135,7 +142,7 @@ public final class DurableSinkQueue implements Closeable {
             pending.incrementAndGet();
             return true;
         } finally {
-            lock.unlock();
+            backlogLock.unlock();
         }
     }
 
@@ -148,15 +155,28 @@ public final class DurableSinkQueue implements Closeable {
         if (closed) {
             return List.of();
         }
-        lock.lock();
+        // Reservados na retry primeiro (inclui recovery). Só o forwarder toca a retry (peek/ack na
+        // mesma thread), então ela é estável entre esta leitura e o move abaixo.
+        retryLock.lock();
         try {
             List<ReplayRecord> reserved = new ArrayList<>(retry.readRange(0, batchSize).items());
             if (!reserved.isEmpty()) {
                 return reserved;
             }
-            return moveBacklogBatchToRetry();
         } finally {
-            lock.unlock();
+            retryLock.unlock();
+        }
+        // Retry vazia: move um lote do backlog para a retry (precisa das duas; ordem backlog -> retry).
+        backlogLock.lock();
+        try {
+            retryLock.lock();
+            try {
+                return moveBacklogBatchToRetry();
+            } finally {
+                retryLock.unlock();
+            }
+        } finally {
+            backlogLock.unlock();
         }
     }
 
@@ -177,19 +197,30 @@ public final class DurableSinkQueue implements Closeable {
 
     /** Confirma (remove) um registro entregue, da cabeça da {@code retry} (poll destrutivo, FIFO). */
     public void ack() throws IOException {
-        if (closed) {
+        ack(1);
+    }
+
+    /**
+     * Confirma (remove) {@code n} registros entregues — o prefixo contíguo da {@code retry} — numa
+     * <b>única</b> seção crítica (uma aquisição de lock em vez de {@code n}). FIFO, poll destrutivo.
+     */
+    public void ack(int n) throws IOException {
+        if (closed || n <= 0) {
             return;
         }
-        lock.lock();
+        retryLock.lock();
         try {
-            Optional<ReplayRecord> acked = retry.poll(NONBLOCKING, TimeUnit.MILLISECONDS);
-            if (acked.isPresent()) {
-                pending.decrementAndGet();
-            } else {
-                LOG.warn("[{}] ack com retry vazia", sinkId);
+            for (int i = 0; i < n; i++) {
+                Optional<ReplayRecord> acked = retry.poll(NONBLOCKING, TimeUnit.MILLISECONDS);
+                if (acked.isPresent()) {
+                    pending.decrementAndGet();
+                } else {
+                    LOG.warn("[{}] ack com retry vazia", sinkId);
+                    break;
+                }
             }
         } finally {
-            lock.unlock();
+            retryLock.unlock();
         }
     }
 
@@ -204,20 +235,25 @@ public final class DurableSinkQueue implements Closeable {
         if (closed) {
             return pending.get();
         }
-        lock.lock();
+        backlogLock.lock();
         try {
-            if (retentionActive) {
-                long n = backlog.flushExpired();
-                if (n > 0) {
-                    long total = expired.addAndGet(n);
-                    LOG.warn("[{}] {} registro(s) expirado(s) por tempo (expired={})", sinkId, n, total);
+            retryLock.lock();
+            try {
+                if (retentionActive) {
+                    long n = backlog.flushExpired();
+                    if (n > 0) {
+                        long total = expired.addAndGet(n);
+                        LOG.warn("[{}] {} registro(s) expirado(s) por tempo (expired={})", sinkId, n, total);
+                    }
                 }
+                long truth = backlog.size() + retry.size();
+                pending.set(truth);
+                return truth;
+            } finally {
+                retryLock.unlock();
             }
-            long truth = backlog.size() + retry.size();
-            pending.set(truth);
-            return truth;
         } finally {
-            lock.unlock();
+            backlogLock.unlock();
         }
     }
 
@@ -226,12 +262,17 @@ public final class DurableSinkQueue implements Closeable {
         if (closed) {
             return;
         }
-        lock.lock();
+        backlogLock.lock();
         try {
-            backlog.sync();
-            retry.sync();
+            retryLock.lock();
+            try {
+                backlog.sync();
+                retry.sync();
+            } finally {
+                retryLock.unlock();
+            }
         } finally {
-            lock.unlock();
+            backlogLock.unlock();
         }
     }
 

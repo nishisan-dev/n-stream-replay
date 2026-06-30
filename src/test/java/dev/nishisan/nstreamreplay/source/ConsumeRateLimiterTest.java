@@ -2,9 +2,27 @@ package dev.nishisan.nstreamreplay.source;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.atomic.AtomicLong;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ConsumeRateLimiterTest {
+
+    @Test
+    void limita2000PorSegundoComRelogioDeterministico() {
+        AtomicLong now = new AtomicLong();
+        ConsumeRateLimiter limiter = new ConsumeRateLimiter(2_000L, now::get, now::addAndGet);
+
+        int permits = 10_000;
+        for (int i = 0; i < permits; i++) {
+            limiter.acquire();
+        }
+
+        // O threshold permite microbursts de até 2 ms, mas a média fica no teto configurado.
+        assertThat(now.get()).isBetween(4_990_000_000L, 5_000_000_000L);
+        double measured = permits * 1_000_000_000.0 / now.get();
+        assertThat(measured).isBetween(1_995.0, 2_005.0);
+    }
 
     @Test
     void desabilitadoNaoBloqueia() {

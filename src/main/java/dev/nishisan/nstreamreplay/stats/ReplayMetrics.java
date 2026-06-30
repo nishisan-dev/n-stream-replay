@@ -1,6 +1,7 @@
 package dev.nishisan.nstreamreplay.stats;
 
 import dev.nishisan.nstreamreplay.sink.SinkChannel;
+import dev.nishisan.nstreamreplay.source.SourceConsumer;
 import dev.nishisan.utils.stats.StatsUtils;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,6 +32,7 @@ public class ReplayMetrics {
     private final StatsUtils stats;
     private final ConcurrentHashMap<String, AtomicLong> consumed = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicLong> commitErrors = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> sanitizedIds = new ConcurrentHashMap<>();
 
     @Autowired
     public ReplayMetrics(ObjectProvider<StatsUtils> provider) {
@@ -63,6 +65,26 @@ public class ReplayMetrics {
         gauge("sink", ch.id(), "poisoned_total", ch.poisonedTotal());
         gauge("sink", ch.id(), "offer_errors_total", ch.offerErrors());
         gauge("sink", ch.id(), "retry_backoffs_total", ch.retryBackoffs());
+        var timings = ch.timings();
+        gauge("sink", ch.id(), "queue_peek_nanos_total", timings.queuePeekNanos());
+        gauge("sink", ch.id(), "publish_nanos_total", timings.publishNanos());
+        gauge("sink", ch.id(), "ack_nanos_total", timings.ackNanos());
+        var locks = ch.lockTimings();
+        gauge("sink", ch.id(), "offer_lock_wait_nanos_total", locks.offerLockWaitNanos());
+        gauge("sink", ch.id(), "sync_lock_wait_nanos_total", locks.syncLockWaitNanos());
+    }
+
+    /** Empurra contadores e tempos correntes da origem em baixa frequência. */
+    public void updateSource(SourceConsumer source) {
+        gauge("source", source.id(), "consumed_total", source.consumedTotal());
+        gauge("source", source.id(), "configured_rate_per_sec", source.configuredMaxConsumeRatePerSec());
+        var timings = source.timings();
+        gauge("source", source.id(), "poll_nanos_total", timings.pollNanos());
+        gauge("source", source.id(), "limiter_wait_nanos_total", timings.limiterWaitNanos());
+        gauge("source", source.id(), "offer_nanos_total", timings.offerNanos());
+        gauge("source", source.id(), "sync_nanos_total", timings.syncNanos());
+        gauge("source", source.id(), "commit_nanos_total", timings.commitNanos());
+        gauge("source", source.id(), "polled_batches_total", timings.polledBatches());
     }
 
     private void gauge(String dim, String id, String metric, long value) {
@@ -71,8 +93,9 @@ public class ReplayMetrics {
         }
     }
 
-    private static String name(String dim, String id, String metric) {
-        return PREFIX + "." + dim + "." + sanitize(id) + "." + metric;
+    private String name(String dim, String id, String metric) {
+        return PREFIX + "." + dim + "." + sanitizedIds.computeIfAbsent(id, ReplayMetrics::sanitize)
+                + "." + metric;
     }
 
     /** Mantém só {@code [a-zA-Z0-9_]} (nomes de meter do Micrometer não têm tags aqui). */

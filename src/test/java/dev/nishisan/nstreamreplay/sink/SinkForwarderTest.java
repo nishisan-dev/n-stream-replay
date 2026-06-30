@@ -12,11 +12,72 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class SinkForwarderTest {
+
+    @Test
+    void publicacaoLentaNaoBloqueiaOffersNemOCrescimentoDoBacklog(@TempDir Path tmp) throws Exception {
+        try (DurableSinkQueue q = DurableSinkQueue.open("s", cfg(tmp, 100))) {
+            q.offer(rec(0));
+            CountDownLatch publishEntered = new CountDownLatch(1);
+            CountDownLatch releasePublish = new CountDownLatch(1);
+            CountDownLatch producerDone = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+
+            Sink slowSink = batch -> {
+                publishEntered.countDown();
+                try {
+                    releasePublish.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return PublishOutcome.none();
+                }
+                return new PublishOutcome(batch.size(), 0);
+            };
+            SinkForwarder fwd = new SinkForwarder("s", q, slowSink, 0L);
+            Thread forwarderThread = new Thread(() -> {
+                try {
+                    fwd.forwardOnce();
+                } catch (Throwable e) {
+                    failure.set(e);
+                }
+            }, "slow-forwarder");
+            forwarderThread.start();
+            assertThat(publishEntered.await(2, TimeUnit.SECONDS)).isTrue();
+
+            Thread producer = new Thread(() -> {
+                try {
+                    for (int i = 1; i <= 2_000; i++) {
+                        q.offer(rec(i));
+                    }
+                } catch (Throwable e) {
+                    failure.set(e);
+                } finally {
+                    producerDone.countDown();
+                }
+            }, "source-offers");
+            producer.start();
+
+            try {
+                assertThat(producerDone.await(3, TimeUnit.SECONDS))
+                        .as("offers devem prosseguir enquanto o sink espera a rede")
+                        .isTrue();
+                assertThat(q.depth()).isEqualTo(2_001L);
+                assertThat(fwd.publishedTotal()).isZero();
+            } finally {
+                releasePublish.countDown();
+                producer.join(3_000);
+                forwarderThread.join(3_000);
+            }
+            assertThat(failure.get()).isNull();
+        }
+    }
 
     private static QueueProperties cfg(Path tmp, int batchSize) {
         return new QueueProperties(tmp.toString(), 1_000_000, Duration.ZERO,

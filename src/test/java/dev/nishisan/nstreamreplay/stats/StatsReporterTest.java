@@ -28,4 +28,16 @@ class StatsReporterTest {
                 List.of());
         assertThat(out).contains("n/a");
     }
+
+    @Test
+    void formatTimingsExplicitaEtapasELockWaitsDaJanela() {
+        String out = StatsReporter.formatTimings(
+                List.of(new StatsReporter.SourceTimingLine("source-a", 120, 450, 80, 10, 20, 4)),
+                List.of(new StatsReporter.SinkTimingLine("sink-a", 30, 700, 40, 12, 3)));
+
+        assertThat(out).contains("TIMINGS (ms/window)")
+                .contains("limiter").contains("offerLock").contains("syncLock")
+                .contains("source-a").contains("sink-a")
+                .contains("450").contains("700");
+    }
 }

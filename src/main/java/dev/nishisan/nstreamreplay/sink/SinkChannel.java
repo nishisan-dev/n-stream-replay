@@ -131,6 +131,14 @@ public final class SinkChannel implements SinkTarget, Closeable {
         return forwarder.online();
     }
 
+    public SinkForwarder.TimingSnapshot timings() {
+        return forwarder.timings();
+    }
+
+    public DurableSinkQueue.LockTimingSnapshot lockTimings() {
+        return queue.lockTimings();
+    }
+
     /** Para o forwarder, faz join, fecha o producer e a fila (libera o lock do disco). */
     @Override
     public void close() throws IOException {

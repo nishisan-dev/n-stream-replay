@@ -20,31 +20,21 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Fila durável store-and-forward de um destino, no padrão <b>dupla-fila</b> ({@code backlog}
- * + {@code retry}) — espelha o {@code MetricStreamQueue} do ape-probe, adaptado para drop-oldest
- * por contagem <i>e</i> por tempo, e at-least-once.
+ * Fila durável store-and-forward no padrão dupla-fila ({@code backlog + retry}). O backlog recebe
+ * a origem e a retry protege o lote em voo; o forwarder move em chunks curtos sem manter o
+ * {@code backlogLock} enquanto persiste o item na retry.
  *
- * <p><b>Locks separados por fila:</b> a {@code NQueue} já é thread-safe internamente; o
- * {@link #backlogLock} serializa as operações de {@code backlog} (offer da origem, poll do move)
- * e o {@link #retryLock} as de {@code retry} (move, ack do forwarder). Com isso a origem
- * ({@code offer}) e a confirmação ({@code ack}) <b>deixam de contender</b> — só
- * {@link #peekBatch()}, {@link #sync()} e {@link #sweepAndReconcile()} tocam as duas, sempre na
- * ordem {@code backlog -> retry} (evita deadlock).
+ * <p><b>Contenção:</b> a NQueue já serializa internamente cada operação. {@link #backlogLock}
+ * coordena offer e remoção. {@link #peekBatch()} o mantém apenas durante cada {@code poll} do
+ * backlog e o libera antes do {@code offer} correspondente na retry. Assim, a origem pode
+ * intercalar offers durante o I/O da retry sem reduzir o lote final enviado ao Kafka.
  *
- * <p><b>Fluxo:</b> a origem {@link #offer(ReplayRecord)} no {@code backlog} (nunca bloqueia;
- * drop-oldest ao atingir {@code maxDepth}). O forwarder {@link #peekBatch()} reserva um lote
- * movendo {@code backlog -> retry}, publica na rede (fora do lock) e confirma o prefixo
- * entregue com {@link #ack()} (poll destrutivo na {@code retry}). Um crash entre o move e o
- * ack faz os itens reaparecerem na {@code retry} no boot (at-least-once).
+ * <p><b>Fluxo:</b> o forwarder reserva movendo backlog para retry, publica fora dos locks e confirma
+ * o prefixo entregue com {@link #ack(int)}. Crash depois do move reencontra os itens na retry.
+ * O TTL fica ativo apenas no backlog; itens já reservados nunca expiram nem sofrem drop-oldest.
  *
- * <p><b>TTL sem divergência:</b> o {@code backlog} é tocado apenas por {@code offer},
- * {@code poll} (não-bloqueante, honra {@code expireAfterWrite}) e {@code flushExpired} — nunca
- * por {@code readRange}. O peek de reservados usa {@code readRange} apenas na {@code retry},
- * que tem TTL desligado. Isso evita a divergência {@code readRange}×{@code poll} sob TTL
- * alertada no Javadoc da {@code NQueue}.
- *
- * <p>Não é thread-safe entre múltiplos forwarders: assume <b>um</b> produtor (thread de poll
- * da origem) e <b>um</b> forwarder por instância; o lock serializa a interação entre eles.
+ * <p>Suporta producers concorrentes, mas assume <b>um</b> forwarder por instância; um segundo
+ * forwarder quebraria a reserva FIFO entre {@link #peekBatch()} e {@link #ack(int)}.
  */
 public final class DurableSinkQueue implements Closeable {
 
@@ -53,6 +43,8 @@ public final class DurableSinkQueue implements Closeable {
     private static final String RETRY_NAME = "retry";
     /** poll não-bloqueante (timeout 0 retorna imediatamente). */
     private static final long NONBLOCKING = 0L;
+    /** Limita quanto tempo contínuo o forwarder mantém a retry reservada para uma transferência. */
+    private static final int MOVE_CHUNK_SIZE = 64;
 
     private final String sinkId;
     private final NQueue<ReplayRecord> backlog;
@@ -66,6 +58,8 @@ public final class DurableSinkQueue implements Closeable {
     private final AtomicLong pending = new AtomicLong();
     private final AtomicLong dropped = new AtomicLong();
     private final AtomicLong expired = new AtomicLong();
+    private final AtomicLong offerLockWaitNanos = new AtomicLong();
+    private final AtomicLong syncLockWaitNanos = new AtomicLong();
     private volatile boolean closed = false;
 
     DurableSinkQueue(String sinkId, NQueue<ReplayRecord> backlog, NQueue<ReplayRecord> retry,
@@ -87,7 +81,6 @@ public final class DurableSinkQueue implements Closeable {
 
         NQueue.Options backlogOpts = baseOptions(perRecordFsync);
         if (cfg.hasRetentionTime()) {
-            // Drop-oldest por TEMPO de dados NÃO entregues: expira o prefixo antigo do backlog.
             backlogOpts.withExpireAfterWrite(cfg.retentionTime());
         }
         // retry: TTL desligado — nunca expira item em voo (reservado para entrega).
@@ -116,14 +109,15 @@ public final class DurableSinkQueue implements Closeable {
     }
 
     /**
-     * Enfileira o registro no backlog; nunca bloqueia. Ao atingir {@code maxDepth}, aplica
-     * DROP-oldest (descarta a cabeça do backlog) e admite o novo. Retorna {@code false} apenas
+     * Enfileira o registro no backlog sem esperar capacidade (pode aguardar brevemente o lock local).
+     * Ao atingir {@code maxDepth}, aplica DROP-oldest (descarta a cabeça do backlog) e admite o novo.
+     * Retorna {@code false} apenas
      * no caso degenerado de backlog vazio com a fila cheia (tudo em voo na retry,
      * {@code maxDepth <= batchSize}), descartando o novo registro.
      */
     public boolean offer(ReplayRecord record) throws IOException {
         ensureOpen();
-        backlogLock.lock();
+        lockMeasuringContention(backlogLock, offerLockWaitNanos);
         try {
             if (pending.get() >= maxDepth) {
                 Optional<ReplayRecord> evicted = backlog.poll(NONBLOCKING, TimeUnit.MILLISECONDS);
@@ -147,16 +141,14 @@ public final class DurableSinkQueue implements Closeable {
     }
 
     /**
-     * Lote a publicar: primeiro os já reservados na {@code retry} (inclui recovery), lidos sem
-     * consumir; se vazia, move um lote do {@code backlog} para a {@code retry} e o devolve. Não
-     * remove da retry — isso é o {@link #ack()}.
+     * Lote a publicar: primeiro os já reservados na retry; se vazia, compõe até batchSize movendo
+     * chunks curtos do backlog. Cada item é removido sob o backlogLock, que é liberado antes de
+     * persistir o item na retry; a retryLock impede sync/reconcile de observar a transferência no meio.
      */
     public List<ReplayRecord> peekBatch() throws IOException {
         if (closed) {
             return List.of();
         }
-        // Reservados na retry primeiro (inclui recovery). Só o forwarder toca a retry (peek/ack na
-        // mesma thread), então ela é estável entre esta leitura e o move abaixo.
         retryLock.lock();
         try {
             List<ReplayRecord> reserved = new ArrayList<>(retry.readRange(0, batchSize).items());
@@ -166,44 +158,51 @@ public final class DurableSinkQueue implements Closeable {
         } finally {
             retryLock.unlock();
         }
-        // Retry vazia: move um lote do backlog para a retry (precisa das duas; ordem backlog -> retry).
-        backlogLock.lock();
-        try {
+
+        List<ReplayRecord> moved = new ArrayList<>(batchSize);
+        while (moved.size() < batchSize) {
+            boolean exhausted;
             retryLock.lock();
             try {
-                return moveBacklogBatchToRetry();
+                exhausted = moveBacklogChunkToRetry(moved);
             } finally {
                 retryLock.unlock();
             }
-        } finally {
-            backlogLock.unlock();
-        }
-    }
-
-    private List<ReplayRecord> moveBacklogBatchToRetry() throws IOException {
-        List<ReplayRecord> moved = new ArrayList<>(batchSize);
-        for (int i = 0; i < batchSize; i++) {
-            // poll honra expireAfterWrite (expirados são pulados, não movidos para a retry).
-            Optional<ReplayRecord> head = backlog.poll(NONBLOCKING, TimeUnit.MILLISECONDS);
-            if (head.isEmpty()) {
+            if (exhausted) {
                 break;
             }
-            retry.offer(head.get());
-            moved.add(head.get());
-            // pending inalterado: saiu do backlog, entrou na retry.
         }
         return moved;
     }
 
-    /** Confirma (remove) um registro entregue, da cabeça da {@code retry} (poll destrutivo, FIFO). */
+    /** Move no máximo um chunk; retorna true quando o backlog acabou. retryLock já adquirido. */
+    private boolean moveBacklogChunkToRetry(List<ReplayRecord> moved) throws IOException {
+        int chunkEnd = Math.min(batchSize, moved.size() + MOVE_CHUNK_SIZE);
+        while (moved.size() < chunkEnd) {
+            Optional<ReplayRecord> head;
+            backlogLock.lock();
+            try {
+                head = backlog.poll(NONBLOCKING, TimeUnit.MILLISECONDS);
+            } finally {
+                backlogLock.unlock();
+            }
+            if (head.isEmpty()) {
+                return true;
+            }
+            // O I/O/serialização da retry não precisa bloquear o produtor do backlog.
+            retry.offer(head.get());
+            moved.add(head.get());
+            // pending inalterado: saiu do backlog, entrou na retry.
+        }
+        return false;
+    }
+
+    /** Confirma (remove) um registro entregue da cabeça da retry. */
     public void ack() throws IOException {
         ack(1);
     }
 
-    /**
-     * Confirma (remove) {@code n} registros entregues — o prefixo contíguo da {@code retry} — numa
-     * <b>única</b> seção crítica (uma aquisição de lock em vez de {@code n}). FIFO, poll destrutivo.
-     */
+    /** Confirma o prefixo contíguo entregue numa única aquisição do retryLock. */
     public void ack(int n) throws IOException {
         if (closed || n <= 0) {
             return;
@@ -224,20 +223,14 @@ public final class DurableSinkQueue implements Closeable {
         }
     }
 
-    /**
-     * Expira (e contabiliza) o prefixo vencido do backlog quando há retenção por tempo, e
-     * reconcilia o contador {@code pending} ao tamanho real ({@code backlog + retry}),
-     * corrigindo qualquer drift. Deve ser chamado periodicamente pelo forwarder.
-     *
-     * @return profundidade reconciliada
-     */
+    /** Expira o prefixo vencido do backlog e reconcilia a profundidade física. */
     public long sweepAndReconcile() throws IOException {
         if (closed) {
             return pending.get();
         }
-        backlogLock.lock();
+        retryLock.lock();
         try {
-            retryLock.lock();
+            backlogLock.lock();
             try {
                 if (retentionActive) {
                     long n = backlog.flushExpired();
@@ -250,10 +243,10 @@ public final class DurableSinkQueue implements Closeable {
                 pending.set(truth);
                 return truth;
             } finally {
-                retryLock.unlock();
+                backlogLock.unlock();
             }
         } finally {
-            backlogLock.unlock();
+            retryLock.unlock();
         }
     }
 
@@ -262,17 +255,17 @@ public final class DurableSinkQueue implements Closeable {
         if (closed) {
             return;
         }
-        backlogLock.lock();
+        lockMeasuringContention(retryLock, syncLockWaitNanos);
         try {
-            retryLock.lock();
+            lockMeasuringContention(backlogLock, syncLockWaitNanos);
             try {
                 backlog.sync();
                 retry.sync();
             } finally {
-                retryLock.unlock();
+                backlogLock.unlock();
             }
         } finally {
-            backlogLock.unlock();
+            retryLock.unlock();
         }
     }
 
@@ -289,6 +282,20 @@ public final class DurableSinkQueue implements Closeable {
     /** Total expirado por tempo ({@code retentionTime}) — perda silenciosa, deve ser alertado. */
     public long expired() {
         return expired.get();
+    }
+
+    /** Tempo acumulado efetivamente aguardando locks nos caminhos executados pela origem. */
+    public LockTimingSnapshot lockTimings() {
+        return new LockTimingSnapshot(offerLockWaitNanos.get(), syncLockWaitNanos.get());
+    }
+
+    private static void lockMeasuringContention(ReentrantLock lock, AtomicLong waitNanos) {
+        if (lock.tryLock()) {
+            return;
+        }
+        long started = System.nanoTime();
+        lock.lock();
+        waitNanos.addAndGet(System.nanoTime() - started);
     }
 
     private void ensureOpen() {
@@ -316,5 +323,8 @@ public final class DurableSinkQueue implements Closeable {
         if (first != null) {
             throw first;
         }
+    }
+
+    public record LockTimingSnapshot(long offerLockWaitNanos, long syncLockWaitNanos) {
     }
 }

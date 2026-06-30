@@ -33,6 +33,9 @@ public final class SinkForwarder implements Runnable {
     private final AtomicLong publishedTotal = new AtomicLong();
     private final AtomicLong poisonedTotal = new AtomicLong();
     private final AtomicLong retryBackoffs = new AtomicLong();
+    private final AtomicLong queuePeekNanos = new AtomicLong();
+    private final AtomicLong publishNanos = new AtomicLong();
+    private final AtomicLong ackNanos = new AtomicLong();
     /** Otimista: começa online; só vira offline quando uma publicação com itens falha. */
     private volatile boolean online = true;
     private volatile boolean running = true;
@@ -79,19 +82,33 @@ public final class SinkForwarder implements Runnable {
      * subir a thread. Retorna {@code true} se havia itens.
      */
     boolean forwardOnce() throws Exception {
-        List<ReplayRecord> items = queue.peekBatch();
+        long peekStarted = System.nanoTime();
+        List<ReplayRecord> items;
+        try {
+            items = queue.peekBatch();
+        } finally {
+            queuePeekNanos.addAndGet(System.nanoTime() - peekStarted);
+        }
         if (items.isEmpty()) {
             return false;
         }
         PublishOutcome outcome;
+        long publishStarted = System.nanoTime();
         try {
             outcome = sink.publish(items);
         } catch (Exception e) {
             LOG.warn("[{}] broker indisponível — {} item(ns) permanecem na fila", sinkId, items.size(), e);
             outcome = PublishOutcome.none();
+        } finally {
+            publishNanos.addAndGet(System.nanoTime() - publishStarted);
         }
         int acked = outcome.acked();
-        queue.ack(acked);   // confirma o prefixo entregue numa única seção crítica (retryLock)
+        long ackStarted = System.nanoTime();
+        try {
+            queue.ack(acked);   // confirma o prefixo entregue numa única seção crítica (retryLock)
+        } finally {
+            ackNanos.addAndGet(System.nanoTime() - ackStarted);
+        }
         if (outcome.published() > 0) {
             publishedTotal.addAndGet(outcome.published());
         }
@@ -130,6 +147,11 @@ public final class SinkForwarder implements Runnable {
         return online;
     }
 
+    /** Totais monotônicos de tempo por etapa do forwarder. */
+    public TimingSnapshot timings() {
+        return new TimingSnapshot(queuePeekNanos.get(), publishNanos.get(), ackNanos.get());
+    }
+
     private static long msToNanos(long ms) {
         return ms * 1_000_000L;
     }
@@ -145,5 +167,8 @@ public final class SinkForwarder implements Runnable {
             Thread.currentThread().interrupt();
             return false;
         }
+    }
+
+    public record TimingSnapshot(long queuePeekNanos, long publishNanos, long ackNanos) {
     }
 }

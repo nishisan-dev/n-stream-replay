@@ -66,7 +66,9 @@ public class ReplayEngine implements SmartLifecycle {
         if (running) {
             return;
         }
-        LOG.info("ReplayEngine iniciando: {} origem(ns), {} destino(s), {} rota(s)",
+        String version = ReplayEngine.class.getPackage().getImplementationVersion();
+        LOG.info("ReplayEngine iniciando (versão={}): {} origem(ns), {} destino(s), {} rota(s)",
+                version == null ? "development" : version,
                 properties.sources().size(), properties.sinks().size(),
                 properties.routes() == null ? 0 : properties.routes().size());
         try {
@@ -140,6 +142,7 @@ public class ReplayEngine implements SmartLifecycle {
 
     private void pushMetrics() {
         try {
+            sources.forEach(metrics::updateSource);
             channels.values().forEach(metrics::updateSink);
         } catch (RuntimeException e) {
             LOG.warn("tick de métricas falhou", e);

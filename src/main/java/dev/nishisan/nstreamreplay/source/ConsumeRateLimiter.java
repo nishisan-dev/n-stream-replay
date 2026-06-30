@@ -1,6 +1,8 @@
 package dev.nishisan.nstreamreplay.source;
 
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.LongConsumer;
+import java.util.function.LongSupplier;
 
 /**
  * Limitador de taxa de consumo de uma origem, em <b>registros por segundo</b> — token-bucket
@@ -25,12 +27,21 @@ public final class ConsumeRateLimiter {
 
     private final long permitsPerSec;
     private final long intervalNanos;
+    private final LongSupplier nanoTime;
+    private final LongConsumer parkNanos;
     private long nextFreeNanos;
 
     public ConsumeRateLimiter(long permitsPerSec) {
+        this(permitsPerSec, System::nanoTime, LockSupport::parkNanos);
+    }
+
+    /** Relógio e park injetáveis para testes determinísticos do pacing. */
+    ConsumeRateLimiter(long permitsPerSec, LongSupplier nanoTime, LongConsumer parkNanos) {
         this.permitsPerSec = Math.max(0L, permitsPerSec);
         this.intervalNanos = this.permitsPerSec > 0 ? 1_000_000_000L / this.permitsPerSec : 0L;
-        this.nextFreeNanos = System.nanoTime();
+        this.nanoTime = nanoTime;
+        this.parkNanos = parkNanos;
+        this.nextFreeNanos = nanoTime.getAsLong();
     }
 
     public boolean enabled() {
@@ -49,7 +60,7 @@ public final class ConsumeRateLimiter {
         if (intervalNanos == 0L) {
             return;
         }
-        long now = System.nanoTime();
+        long now = nanoTime.getAsLong();
         // Limita o crédito de catch-up: nextFreeNanos não fica mais que MAX_BURST_NANOS no passado.
         long floor = now - MAX_BURST_NANOS;
         if (nextFreeNanos < floor) {
@@ -63,8 +74,8 @@ public final class ConsumeRateLimiter {
         }
         long remaining = debt;                            // dorme até o deadline (≥ 2 ms, preciso)
         while (remaining > 0L) {
-            LockSupport.parkNanos(remaining);
-            remaining = scheduled - System.nanoTime();
+            parkNanos.accept(remaining);
+            remaining = scheduled - nanoTime.getAsLong();
         }
     }
 }

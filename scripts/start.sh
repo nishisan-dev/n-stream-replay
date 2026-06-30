@@ -5,10 +5,29 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SCRIPT_DIR"
 
-JAR="${JAR:-$(ls -1 n-stream-replay-*.jar target/n-stream-replay-*.jar 2>/dev/null | head -1)}"
-if [[ -z "${JAR:-}" || ! -f "$JAR" ]]; then
-  echo "ERRO: fat jar n-stream-replay-*.jar não encontrado. Rode 'mvn clean package'." >&2
-  exit 1
+if [[ -n "${JAR:-}" ]]; then
+  if [[ ! -f "$JAR" ]]; then
+    echo "ERRO: JAR informado não existe: $JAR" >&2
+    exit 1
+  fi
+else
+  shopt -s nullglob
+  JARS=(n-stream-replay-*.jar target/n-stream-replay-*.jar)
+  shopt -u nullglob
+  case "${#JARS[@]}" in
+    0)
+      echo "ERRO: fat jar n-stream-replay-*.jar não encontrado. Rode 'mvn clean package'." >&2
+      exit 1
+      ;;
+    1)
+      JAR="${JARS[0]}"
+      ;;
+    *)
+      echo "ERRO: múltiplos jars encontrados; limpe o build ou informe JAR explicitamente:" >&2
+      printf '  %s\n' "${JARS[@]}" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # ZGC geracional; --enable-native-access silencia o warning do LZ4 do Kafka.

@@ -37,4 +37,21 @@ class ConsumeRateLimiterTest {
         assertThat(elapsedMs).isGreaterThanOrEqualTo(350L);
         assertThat(elapsedMs).isLessThan(3_000L);
     }
+
+    @Test
+    void precisoEmTaxaAlta() {
+        long rate = 5000;                         // 5000/s => intervalo de 200 µs (sub-ms)
+        ConsumeRateLimiter limiter = new ConsumeRateLimiter(rate);
+
+        int n = 5000;                             // ~ 1 s no total
+        long t0 = System.nanoTime();
+        for (int i = 0; i < n; i++) {
+            limiter.acquire();
+        }
+        long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;
+
+        // Média precisa mesmo em sub-ms: ~1000 ms (sem o under/over-shoot do sleep por registro).
+        assertThat(elapsedMs).isGreaterThanOrEqualTo(850L);
+        assertThat(elapsedMs).isLessThan(1_600L);
+    }
 }

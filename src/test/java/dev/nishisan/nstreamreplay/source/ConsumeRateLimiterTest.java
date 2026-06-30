@@ -54,4 +54,33 @@ class ConsumeRateLimiterTest {
         assertThat(elapsedMs).isGreaterThanOrEqualTo(850L);
         assertThat(elapsedMs).isLessThan(1_600L);
     }
+
+    @Test
+    void recuperaAposStallSemPerderAMedia() {
+        long rate = 1000;                          // 1000/s => intervalo de 1 ms
+        ConsumeRateLimiter limiter = new ConsumeRateLimiter(rate);
+
+        int n = 100;                               // sem stall, ~100 ms no total
+        long t0 = System.nanoTime();
+        for (int i = 0; i < n; i++) {
+            limiter.acquire();
+            if (i == 49) {
+                sleepMs(50);                       // stall de 50 ms no meio (simula oversleep/jitter)
+            }
+        }
+        long elapsedMs = (System.nanoTime() - t0) / 1_000_000L;
+
+        // Com catch-up, o stall é absorvido pelo burst seguinte (dívida negativa) -> total ~100 ms.
+        // Sem catch-up (clamp a now), seriam ~150 ms (50 + 50 stall + 50 repacing).
+        assertThat(elapsedMs).isGreaterThanOrEqualTo(90L);
+        assertThat(elapsedMs).isLessThan(135L);
+    }
+
+    private static void sleepMs(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
 }

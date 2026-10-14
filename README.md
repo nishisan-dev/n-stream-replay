@@ -1,6 +1,6 @@
 # n-stream-replay
 
-Relay **Kafka store-and-forward** com **roteamento por tópico**: declaram-se **origens** (sources) e **destinos** (sinks) como conexões puras, e **rotas** que mapeiam um **tópico de origem → N alvos `{sink, toTopic?}`** (de-para, fan-out, merge, espelho). Sem transformação de mensagem e sem rate-limit.
+Relay **Kafka store-and-forward** com **roteamento por tópico**: declaram-se **origens** (sources) e **destinos** (sinks) como conexões puras, e **rotas** que mapeiam um **tópico de origem → N alvos `{sink, toTopic?, partitionKey?}`** (de-para, fan-out, merge, espelho). O payload é preservado; a chave de publicação pode ser extraída de JSON ou YAML.
 
 Cada **destino** possui uma **fila durável (NQueue, em disco)** própria. Se o destino fica offline, as mensagens dele ficam na fila e são **re-entregues quando ele volta** — sem travar a origem nem os demais destinos.
 
@@ -16,6 +16,57 @@ orders.in (orders-src) ┤
 - **merge:** duas rotas com o mesmo `{sink, toTopic}` (N tópicos → 1 destino).
 - **espelho:** `toTopic` omitido → o destino preserva o nome do tópico de origem.
 - **rate limit por origem:** `maxConsumeRatePerSec` (registros/s; `0` = ilimitado) limita a taxa de consumo da origem.
+
+## Decoder e chave de publicação
+
+Por padrão, `decoder: text` mantém o encaminhamento dos bytes originais. Para definir
+uma chave Kafka a partir do payload, configure `decoder: json` ou `decoder: yaml` no
+source e `partitionKey` no alvo da rota:
+
+```yaml
+nstreamreplay:
+  sources:
+    - id: orders-src
+      bootstrapServers: "localhost:9092"
+      groupId: orders-relay
+      decoder: json
+  sinks:
+    - id: dc2-mirror
+      bootstrapServers: "localhost:9092"
+  routes:
+    - id: orders-mirror
+      source: orders-src
+      fromTopic: orders.in
+      to:
+        - { sink: dc2-mirror, toTopic: orders.mirror, partitionKey: "payload.Id" }
+```
+
+`payload.Id` acessa uma propriedade aninhada; `id` acessa a raiz. Os nomes são
+sensíveis a maiúsculas. Cada segmento aceita letras, números, `_`, `$` e `-`;
+o ponto separa propriedades. Não há indexação de arrays, curingas, expressões nem
+escape para nomes contendo ponto.
+
+- Strings (inclusive vazias), números e booleanos viram a chave em UTF-8, sem aspas
+  JSON e sem remover espaços. A chave original é substituída apenas nesse alvo.
+- Campo ausente/null, objeto/array ou payload inválido descartam **somente os alvos
+  que exigem a chave**. Tombstones são tratados como chave ausente. A aplicação
+  continua e confirma os offsets após processar/sincronizar os demais alvos.
+- Sem `partitionKey`, a chave e o payload originais são preservados, mesmo se o
+  payload não puder ser decodificado. O decoder é executado somente quando necessário.
+- O payload nunca é reserializado. A chave extraída é gravada na fila durável antes
+  do commit e permanece igual após retries, reinícios ou mudança de configuração.
+- Decoder desconhecido, `custom` (reservado para o futuro), caminho inválido,
+  `partitionKey` com `text` e políticas conflitantes para um mesmo destino impedem
+  o boot. JSON/YAML devem conter um único documento; propriedades duplicadas são inválidas.
+
+O Kafka escolhe a partição pela chave usando o producer configurado. O recurso serve
+para mensagens sem chave em uma origem de uma partição e também para outras topologias.
+As opções Kafka em `extraProps` continuam sob responsabilidade da configuração do producer.
+
+Os stats incluem `decodeErrors` (por mensagem), `decodeDropped`, `keyMissingDropped`
+e `keyTypeDropped` (por alvo deduplicado). Também são expostos por source no Prometheus;
+veja os nomes completos na [arquitetura](docs/architecture.md). São contadores da execução
+atual; reprocessamentos após falha de commit podem contabilizar novamente o descarte.
 
 ## Stack
 - Java 25, Spring Boot 3.5.6 (web servlet, apenas para expor métricas)

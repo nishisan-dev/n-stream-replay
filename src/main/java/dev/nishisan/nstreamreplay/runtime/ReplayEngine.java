@@ -1,6 +1,7 @@
 package dev.nishisan.nstreamreplay.runtime;
 
 import dev.nishisan.nstreamreplay.config.NStreamReplayProperties;
+import dev.nishisan.nstreamreplay.config.ConfigValidator;
 import dev.nishisan.nstreamreplay.config.SinkProperties;
 import dev.nishisan.nstreamreplay.config.SourceProperties;
 import dev.nishisan.nstreamreplay.route.RouteTable;
@@ -71,6 +72,7 @@ public class ReplayEngine implements SmartLifecycle {
                 version == null ? "development" : version,
                 properties.sources().size(), properties.sinks().size(),
                 properties.routes() == null ? 0 : properties.routes().size());
+        ConfigValidator.validate(properties);
         try {
             openReferencedChannels();
             RouteTable routeTable = RouteTable.build(properties.routes(), channels);

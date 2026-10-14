@@ -40,4 +40,14 @@ class StatsReporterTest {
                 .contains("source-a").contains("sink-a")
                 .contains("450").contains("700");
     }
+
+    @Test
+    void routingCountersAreIncludedInReport() {
+        var source = org.mockito.Mockito.mock(dev.nishisan.nstreamreplay.source.SourceConsumer.class);
+        org.mockito.Mockito.when(source.id()).thenReturn("orders");
+        org.mockito.Mockito.when(source.routingStats()).thenReturn(
+                new dev.nishisan.nstreamreplay.source.SourceConsumer.RoutingSnapshot(2, 4, 3, 1));
+        assertThat(StatsReporter.formatRouting(java.util.List.of(source)))
+                .contains("orders decodeErrors=2 decodeDropped=4 keyMissingDropped=3 keyTypeDropped=1");
+    }
 }

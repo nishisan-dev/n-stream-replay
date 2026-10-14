@@ -78,6 +78,11 @@ public class ReplayMetrics {
     public void updateSource(SourceConsumer source) {
         gauge("source", source.id(), "consumed_total", source.consumedTotal());
         gauge("source", source.id(), "configured_rate_per_sec", source.configuredMaxConsumeRatePerSec());
+        var routing = source.routingStats();
+        gauge("source", source.id(), "decode_errors_total", routing.decodeErrors());
+        gauge("source", source.id(), "decode_dropped_total", routing.decodeDropped());
+        gauge("source", source.id(), "partition_key_missing_dropped_total", routing.keyMissingDropped());
+        gauge("source", source.id(), "partition_key_type_dropped_total", routing.keyTypeDropped());
         var timings = source.timings();
         gauge("source", source.id(), "poll_nanos_total", timings.pollNanos());
         gauge("source", source.id(), "limiter_wait_nanos_total", timings.limiterWaitNanos());

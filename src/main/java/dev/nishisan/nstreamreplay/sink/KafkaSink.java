@@ -25,7 +25,7 @@ import java.util.concurrent.Future;
 
 /**
  * Sink de produção: publica um lote de {@link ReplayRecord} no tópico Kafka do destino,
- * preservando key/value (bytes originais), headers e timestamp — sem transformação. Key como
+ * preservando key/value da fila (chave original ou extraída), headers e timestamp. Key como
  * {@code byte[]} mantém o particionamento por chave no destino. Envia o lote de forma
  * assíncrona, faz {@code flush} e devolve o {@link PublishOutcome} (prefixo de cabeça a
  * confirmar no FIFO).

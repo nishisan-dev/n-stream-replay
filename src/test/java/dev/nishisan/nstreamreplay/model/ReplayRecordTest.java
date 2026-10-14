@@ -68,4 +68,20 @@ class ReplayRecordTest {
         assertThat(a).isEqualTo(b);
         assertThat(a.hashCode()).isEqualTo(b.hashCode());
     }
+
+    @Test
+    void readsRecordSerializedByMainBeforeDecoders() throws Exception {
+        // Fixture produced by ReplayRecord from main commit 7d07a14 using ObjectOutputStream,
+        // the serialization format used by NQueue. No schema migration should be required.
+        try (var input = new java.io.ObjectInputStream(getClass().getResourceAsStream("/fixtures/replay-record-v2.ser"))) {
+            ReplayRecord record = (ReplayRecord) input.readObject();
+            assertThat(record.sourceTopic()).isEqualTo("legacy.in");
+            assertThat(record.destinationTopic()).isEqualTo("legacy.out");
+            assertThat(record.offset()).isEqualTo(42L);
+            assertThat(record.timestamp()).isEqualTo(1234L);
+            assertThat(record.key()).isEqualTo("old-key".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            assertThat(record.value()).isEqualTo("old-value".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            assertThat(record.headers().get("header")).containsExactly((byte) 1, (byte) 2);
+        }
+    }
 }

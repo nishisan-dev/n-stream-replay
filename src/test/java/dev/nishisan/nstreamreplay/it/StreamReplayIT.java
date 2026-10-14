@@ -201,4 +201,65 @@ class StreamReplayIT {
             dead.close();
         }
     }
+
+    @Test
+    void unkeyedSinglePartitionSourcePublishesExtractedKeysToPartitionedSink(@TempDir Path tmp) throws Exception {
+        String input = "keys.in";
+        String output = "keys.out";
+        try (var admin = org.apache.kafka.clients.admin.Admin.create(Map.of("bootstrap.servers", bootstrap()))) {
+            admin.createTopics(List.of(new org.apache.kafka.clients.admin.NewTopic(input, 1, (short) 1),
+                    new org.apache.kafka.clients.admin.NewTopic(output, 4, (short) 1))).all().get();
+        }
+        SinkChannel sink = openSink("keys", bootstrap(), tmp);
+        var routes = RouteTable.build(List.of(new RouteProperties("r", "keys-src", input,
+                List.of(new RouteTarget("keys", output, "payload.Id")))), Map.of("keys", sink));
+        var source = new SourceConsumer(new SourceProperties("keys-src", bootstrap(), "keys-source-group", null,
+                "earliest", 500, 200, 0, Map.of(), "json"), routes, NOOP);
+        Thread thread = new Thread(source, "keys-it-source");
+        thread.start();
+        try {
+            Properties producerProps = new Properties();
+            producerProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap());
+            producerProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
+            producerProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
+            String payload = "{\"payload\":{\"Id\":\"customer-42\"},\"unchanged\": true}";
+            try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerProps)) {
+                producer.send(new ProducerRecord<>(input, null, "{}".getBytes(StandardCharsets.UTF_8))).get();
+                producer.send(new ProducerRecord<>(input, null, "{".getBytes(StandardCharsets.UTF_8))).get();
+                for (int i = 0; i < 6; i++) {
+                    producer.send(new ProducerRecord<>(input, null, payload.getBytes(StandardCharsets.UTF_8))).get();
+                }
+            }
+            Properties consumerProps = new Properties();
+            consumerProps.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap());
+            consumerProps.put(ConsumerConfig.GROUP_ID_CONFIG, "keys-verify");
+            consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+            consumerProps.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
+            consumerProps.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
+            List<ConsumerRecord<byte[], byte[]>> received = new ArrayList<>();
+            try (KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(consumerProps)) {
+                consumer.subscribe(List.of(output));
+                long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
+                while (received.size() < 6 && System.nanoTime() < deadline) {
+                    consumer.poll(Duration.ofMillis(300)).forEach(received::add);
+                }
+            }
+            assertThat(received).hasSize(6);
+            assertThat(received).allSatisfy(record -> {
+                assertThat(record.key()).isEqualTo("customer-42".getBytes(StandardCharsets.UTF_8));
+                assertThat(record.value()).isEqualTo(payload.getBytes(StandardCharsets.UTF_8));
+            });
+            assertThat(received.stream().map(ConsumerRecord::partition).distinct()).hasSize(1);
+            assertThat(source.routingStats()).isEqualTo(new SourceConsumer.RoutingSnapshot(1, 1, 1, 0));
+            try (var admin = org.apache.kafka.clients.admin.Admin.create(Map.of("bootstrap.servers", bootstrap()))) {
+                await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                        assertThat(admin.listConsumerGroupOffsets("keys-source-group").partitionsToOffsetAndMetadata()
+                                .get().get(new org.apache.kafka.common.TopicPartition(input, 0)).offset()).isEqualTo(8));
+            }
+        } finally {
+            source.stop();
+            thread.join(5000);
+            sink.close();
+        }
+    }
 }

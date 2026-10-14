@@ -109,4 +109,47 @@ class ConfigValidatorTest {
                 "s1", "b:9092", "g", "cli-x", "latest", 500, 1000L, 0L, Map.of());
         assertThat(comClient.resolvedClientId()).isEqualTo("cli-x");
     }
+
+    private static NStreamReplayProperties keyedConfig(String decoder, String... keys) {
+        SourceProperties source = new SourceProperties("s", "b:9092", "g", null, "latest", 500, 1000L, 0L, Map.of(), decoder);
+        List<RouteProperties> routes = new ArrayList<>();
+        for (int i = 0; i < keys.length; i++) {
+            routes.add(new RouteProperties("r" + i, "s", "t",
+                    List.of(new RouteTarget("d", i == 0 ? null : "t", keys[i]))));
+        }
+        return cfg(List.of(source), List.of(sink("d")), routes);
+    }
+
+    @Test
+    void rejectsInvalidDecodersAndTextKeys() {
+        for (String decoder : List.of("custom", "unknown", "", "JSON")) {
+            assertThatThrownBy(() -> ConfigValidator.validate(keyedConfig(decoder, "id")))
+                    .isInstanceOf(IllegalStateException.class).hasMessageContaining("source 's'");
+        }
+        assertThatThrownBy(() -> ConfigValidator.validate(keyedConfig("text", "id")))
+                .hasMessageContaining("partitionKey exige decoder");
+    }
+
+    @Test
+    void rejectsInvalidPathsAndConflictingPoliciesAcrossRoutes() {
+        for (String path : List.of("", " ", "a..b", "a[0]", "a.*")) {
+            assertThatThrownBy(() -> ConfigValidator.validate(keyedConfig("json", path)))
+                    .hasMessageContaining("partitionKey inválido");
+        }
+        for (String other : new String[]{"other", null}) {
+            assertThatThrownBy(() -> ConfigValidator.validate(keyedConfig("json", "id", other)))
+                    .hasMessageContaining("conflitante");
+            assertThatThrownBy(() -> ConfigValidator.validate(keyedConfig("json", other, "id")))
+                    .hasMessageContaining("conflitante");
+        }
+    }
+
+    @Test
+    void acceptsIdenticalPoliciesAndStructuredDecoders() {
+        for (String decoder : List.of("json", "yaml")) {
+            assertThatCode(() -> ConfigValidator.validate(keyedConfig(decoder, "payload.Id", "payload.Id")))
+                    .doesNotThrowAnyException();
+        }
+        assertThatCode(() -> ConfigValidator.validate(keyedConfig("text", null, null))).doesNotThrowAnyException();
+    }
 }

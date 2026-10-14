@@ -164,4 +164,122 @@ class SourceConsumerTest {
             t.join(5_000);
         }
     }
+
+    private static SourceProperties jsonSource() {
+        return new SourceProperties("s1", "ignored:9092", "g", null, "earliest", 500, 200L, 0L, Map.of(), "json");
+    }
+
+    private static RouteTable keyedRoutes(FakeSinkTarget target) {
+        return RouteTable.build(List.of(new RouteProperties("r", "s1", "t", List.of(
+                new RouteTarget(target.id(), "keyed", "payload.Id"),
+                new RouteTarget(target.id(), "keyed", "payload.Id"),
+                new RouteTarget(target.id(), "root", "id"),
+                new RouteTarget(target.id(), "raw")))), Map.of(target.id(), target));
+    }
+
+    @Test
+    void fanoutExtractsOnceDeduplicatesAndCountsDropsPerTarget() throws Exception {
+        FakeSinkTarget target = new FakeSinkTarget("d", true);
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        var stats = new dev.nishisan.utils.stats.StatsUtils();
+        stats.registerListener(new dev.nishisan.utils.spring.stats.StatsUtilsMetricBind(registry));
+        var metrics = new ReplayMetrics(stats);
+        SourceConsumer consumer = new SourceConsumer(jsonSource(), keyedRoutes(target), metrics);
+        byte[] originalKey = "original".getBytes(StandardCharsets.UTF_8);
+        String[] values = {"{", "{}", "{\"payload\":{\"Id\":[]},\"id\":{}}",
+                "{\"payload\":{\"Id\":42},\"id\":true}", null};
+        List<ConsumerRecord<byte[], byte[]>> records = new ArrayList<>();
+        for (int i = 0; i < values.length; i++) {
+            records.add(new ConsumerRecord<>("t", 0, i, originalKey,
+                    values[i] == null ? null : values[i].getBytes(StandardCharsets.UTF_8)));
+            records.get(i).headers().add("header", new byte[]{1, 2});
+        }
+        consumer.enqueueBatch(new ConsumerRecords<>(Map.of(new TopicPartition("t", 0), records)));
+        assertThat(target.received).hasSize(7); // five raw + two keyed; duplicate target removed
+        var keyed = target.received.stream().filter(r -> r.destinationTopic().equals("keyed")).toList();
+        assertThat(keyed).hasSize(1);
+        assertThat(keyed.get(0).key()).isEqualTo("42".getBytes(StandardCharsets.UTF_8));
+        assertThat(keyed.get(0).value()).isEqualTo(records.get(3).value());
+        assertThat(keyed.get(0).timestamp()).isEqualTo(records.get(3).timestamp());
+        assertThat(keyed.get(0).headers().get("header")).containsExactly((byte) 1, (byte) 2);
+        assertThat(target.received.stream().filter(r -> r.destinationTopic().equals("root")).findFirst().orElseThrow().key())
+                .isEqualTo("true".getBytes(StandardCharsets.UTF_8));
+        assertThat(target.received.stream().filter(r -> r.destinationTopic().equals("raw")))
+                .allSatisfy(r -> assertThat(r.key()).isEqualTo(originalKey));
+        assertThat(consumer.routingStats()).isEqualTo(new SourceConsumer.RoutingSnapshot(1, 2, 4, 2));
+        assertThat(target.syncs.get()).isEqualTo(1);
+        metrics.updateSource(consumer);
+        assertThat(registry.get("nstreamreplay.source.s1.decode_errors_total").gauge().value()).isEqualTo(1);
+        assertThat(registry.get("nstreamreplay.source.s1.decode_dropped_total").gauge().value()).isEqualTo(2);
+        assertThat(registry.get("nstreamreplay.source.s1.partition_key_missing_dropped_total").gauge().value()).isEqualTo(4);
+        assertThat(registry.get("nstreamreplay.source.s1.partition_key_type_dropped_total").gauge().value()).isEqualTo(2);
+    }
+
+    @Test
+    void commitsDiscardedRecordsAndContinuesWithNextPoll() throws Exception {
+        TopicPartition tp = new TopicPartition("t", 0);
+        var committed = new java.util.concurrent.atomic.AtomicLong(-1);
+        MockConsumer<byte[], byte[]> mock = new MockConsumer<>(OffsetResetStrategy.EARLIEST) {
+            @Override public void commitSync() {
+                super.commitSync();
+                committed.set(position(tp));
+            }
+        };
+        mock.schedulePollTask(() -> {
+            mock.rebalance(List.of(tp));
+            mock.updateBeginningOffsets(Map.of(tp, 0L));
+            mock.updateEndOffsets(Map.of(tp, 3L));
+            mock.addRecord(kafkaRec("t", 0, 0, "{"));
+            mock.addRecord(kafkaRec("t", 0, 1, "{}"));
+        });
+        mock.schedulePollTask(() -> {
+            assertThat(committed.get()).isEqualTo(2);
+            mock.addRecord(kafkaRec("t", 0, 2, "{\"id\":\"next\"}"));
+        });
+        FakeSinkTarget target = new FakeSinkTarget("d", true);
+        var routes = RouteTable.build(List.of(new RouteProperties("r", "s1", "t",
+                List.of(new RouteTarget("d", null, "id")))), Map.of("d", target));
+        SourceConsumer consumer = new SourceConsumer(jsonSource(), routes, NOOP, () -> mock);
+        Thread thread = new Thread(consumer, "keyed-source-test");
+        thread.start();
+        try {
+            await().atMost(Duration.ofSeconds(5)).until(() -> committed.get() == 3);
+            assertThat(target.received).hasSize(1);
+            assertThat(target.received.get(0).key()).isEqualTo("next".getBytes(StandardCharsets.UTF_8));
+            assertThat(consumer.routingStats()).isEqualTo(new SourceConsumer.RoutingSnapshot(1, 1, 1, 0));
+            assertThat(target.syncs.get()).isEqualTo(1);
+        } finally {
+            consumer.stop();
+            thread.join(5000);
+        }
+    }
+
+    @Test
+    void withoutKeyDoesNotDecodeEvenWithJsonConfigured() throws Exception {
+        FakeSinkTarget target = new FakeSinkTarget("d", false);
+        SourceConsumer consumer = new SourceConsumer(jsonSource(), singleRoute("s1", "t", target), NOOP);
+        consumer.enqueueBatch(new ConsumerRecords<>(Map.of(new TopicPartition("t", 0),
+                List.of(kafkaRec("t", 0, 0, "invalid json")))));
+        assertThat(target.received).hasSize(1);
+        assertThat(consumer.routingStats()).isEqualTo(new SourceConsumer.RoutingSnapshot(0, 0, 0, 0));
+    }
+
+    @Test
+    void extractedKeyAndOriginalRecordsSurviveQueueReopen(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp) throws Exception {
+        FakeSinkTarget target = new FakeSinkTarget("d", false);
+        SourceConsumer consumer = new SourceConsumer(jsonSource(), keyedRoutes(target), NOOP);
+        consumer.enqueueBatch(new ConsumerRecords<>(Map.of(new TopicPartition("t", 0),
+                List.of(kafkaRec("t", 0, 0, "{\"payload\":{\"Id\":\"durable\"},\"id\":1}")))));
+        var queueProps = new dev.nishisan.nstreamreplay.config.QueueProperties(tmp.toString(), 100, Duration.ZERO,
+                dev.nishisan.nstreamreplay.config.Durability.SYNC_ON_COMMIT,
+                dev.nishisan.nstreamreplay.config.OnWriteError.DROP, 10, 100);
+        try (var queue = dev.nishisan.nstreamreplay.sink.DurableSinkQueue.open("d", queueProps)) {
+            for (ReplayRecord record : target.received) queue.offer(record);
+            queue.sync();
+        }
+        try (var queue = dev.nishisan.nstreamreplay.sink.DurableSinkQueue.open("d", queueProps)) {
+            assertThat(queue.peekBatch()).containsExactlyElementsOf(target.received);
+            assertThat(queue.peekBatch().get(0).key()).isEqualTo("durable".getBytes(StandardCharsets.UTF_8));
+        }
+    }
 }

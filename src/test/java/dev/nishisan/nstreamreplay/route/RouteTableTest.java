@@ -47,8 +47,8 @@ class RouteTableTest {
 
     @Test
     void resolveTopicPreservaQuandoToTopicAusente() {
-        RouteTable.Target preserva = new RouteTable.Target(new FakeSinkTarget("x", false), null);
-        RouteTable.Target renomeia = new RouteTable.Target(new FakeSinkTarget("y", false), "dest");
+        RouteTable.Target preserva = new RouteTable.Target(new FakeSinkTarget("x", false), null, null);
+        RouteTable.Target renomeia = new RouteTable.Target(new FakeSinkTarget("y", false), "dest", null);
         assertThat(preserva.resolveTopic("orig")).isEqualTo("orig");
         assertThat(renomeia.resolveTopic("orig")).isEqualTo("dest");
     }

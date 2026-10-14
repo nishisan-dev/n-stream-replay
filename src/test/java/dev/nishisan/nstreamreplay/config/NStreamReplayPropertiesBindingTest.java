@@ -42,6 +42,7 @@ class NStreamReplayPropertiesBindingTest {
                       bootstrapServers: "host-a:9092"
                       groupId: "g1"
                       clientId: "cli-1"
+                      decoder: json
                       autoOffsetReset: earliest
                       maxPollRecords: 250
                       pollTimeoutMs: 750
@@ -69,13 +70,14 @@ class NStreamReplayPropertiesBindingTest {
                       fromTopic: orders.in
                       to:
                         - { sink: d1 }
-                        - { sink: d1, toTopic: orders.raw }
+                        - { sink: d1, toTopic: orders.raw, partitionKey: payload.Id }
                 """;
 
         NStreamReplayProperties props = bind(yaml);
 
         SourceProperties s = props.sources().get(0);
         assertThat(s.id()).isEqualTo("s1");
+        assertThat(s.decoder()).isEqualTo("json");
         assertThat(s.autoOffsetReset()).isEqualTo("earliest");
         assertThat(s.maxPollRecords()).isEqualTo(250);
         assertThat(s.pollTimeoutMs()).isEqualTo(750L);
@@ -99,6 +101,8 @@ class NStreamReplayPropertiesBindingTest {
         assertThat(r.source()).isEqualTo("s1");
         assertThat(r.fromTopic()).isEqualTo("orders.in");
         assertThat(r.to()).hasSize(2);
+        assertThat(r.to().get(1).partitionKey()).isEqualTo("payload.Id");
+        assertThat(r.to().get(0).partitionKey()).isNull();
         assertThat(r.to().get(0).toTopic()).isNull();              // preserva
         assertThat(r.to().get(1).toTopic()).isEqualTo("orders.raw");
     }
@@ -121,6 +125,7 @@ class NStreamReplayPropertiesBindingTest {
         assertThat(s.autoOffsetReset()).isEqualTo("latest");
         assertThat(s.maxPollRecords()).isEqualTo(500);
         assertThat(s.pollTimeoutMs()).isEqualTo(1000L);
+        assertThat(s.decoder()).isEqualTo("text");
         assertThat(s.maxConsumeRatePerSec()).isZero();   // default = ilimitado
         assertThat(s.resolvedClientId()).isEqualTo("s1");
         assertThat(s.extraProps()).isEmpty();

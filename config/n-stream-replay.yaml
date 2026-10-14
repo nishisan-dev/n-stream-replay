@@ -2,7 +2,7 @@
 #  n-stream-replay — configuração de relay Kafka store-and-forward (modelo de ROTAS)
 #
 #  Modelo (v2): ORIGENS (sources) e DESTINOS (sinks) são conexões puras (sem tópico
-#  fixo). As ROTAS amarram um tópico de origem a N alvos {sink, toTopic?}:
+#  fixo). As ROTAS amarram um tópico de origem a N alvos {sink, toTopic?, partitionKey?}:
 #    - toTopic presente: renomeia no destino;  toTopic ausente: preserva o nome de origem.
 #  Os tópicos consumidos por uma origem são a união dos `fromTopic` de suas rotas.
 #  Cada DESTINO tem sua própria fila durável (NQueue) em `queue.basePath/<id>/`; se um
@@ -20,6 +20,7 @@ nstreamreplay:
       maxPollRecords: 500
       pollTimeoutMs: 1000
       maxConsumeRatePerSec: 0              # teto de consumo em registros/s (0 = ilimitado)
+      decoder: text                       # text (default) | json | yaml; custom ainda indisponível
       extraProps: {}                       # passthrough cru p/ o KafkaConsumer (SASL/TLS...)
 
   # ── DESTINOS (producers Kafka + fila durável; sem tópico fixo) ──────────────
@@ -40,11 +41,14 @@ nstreamreplay:
         batchSize: 256                     # lote drenado por iteração do forwarder
         forwarderRetryBackoffMs: 1000      # backoff quando o broker do destino está fora
 
-  # ── ROTAS (tópico de origem -> N alvos {sink, toTopic?}) ────────────────────
+  # ── ROTAS (tópico de origem -> N alvos {sink, toTopic?, partitionKey?}) ────────────────────
   routes:
     - id: orders-mirror
       source: orders-src
       fromTopic: orders.in                 # tópico consumido na origem
       to:
         - { sink: dc2-mirror, toTopic: orders.mirror }   # renomeia no destino
+        # Com decoder: json ou yaml no source, extrai a chave sem alterar o payload:
+        # - { sink: dc2-mirror, toTopic: orders.mirror, partitionKey: "payload.Id" }
+        # Substitua o alvo acima; políticas diferentes para o mesmo destino impedem o boot.
         # - { sink: dc2-mirror }                          # (toTopic ausente = preserva "orders.in")

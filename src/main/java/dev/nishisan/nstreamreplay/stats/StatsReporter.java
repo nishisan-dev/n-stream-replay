@@ -83,8 +83,20 @@ public final class StatsReporter {
                     currentLocks, previousLocks));
         }
 
-        STATS.info("stats (janela {} ms)\n{}{}", elapsedMs, format(sourceLines, sinkLines),
-                formatTimings(sourceTimingLines, sinkTimingLines));
+        STATS.info("stats (janela {} ms)\n{}{}{}", elapsedMs, format(sourceLines, sinkLines),
+                formatRouting(sources), formatTimings(sourceTimingLines, sinkTimingLines));
+    }
+
+    static String formatRouting(List<SourceConsumer> sources) {
+        StringBuilder out = new StringBuilder("ROUTING (totais por source; descartes por alvo):\n");
+        for (SourceConsumer source : sources) {
+            var routing = source.routingStats();
+            out.append(String.format(Locale.ROOT,
+                    "  %s decodeErrors=%d decodeDropped=%d keyMissingDropped=%d keyTypeDropped=%d%n",
+                    source.id(), routing.decodeErrors(), routing.decodeDropped(),
+                    routing.keyMissingDropped(), routing.keyTypeDropped()));
+        }
+        return out.toString();
     }
 
     /** Formata o bloco de stats (função pura, sem efeitos — testável). */

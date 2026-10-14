@@ -1,7 +1,11 @@
 package dev.nishisan.nstreamreplay.source;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import dev.nishisan.nstreamreplay.config.SourceProperties;
+import dev.nishisan.nstreamreplay.decoder.Decoder;
+import dev.nishisan.nstreamreplay.decoder.Decoders;
 import dev.nishisan.nstreamreplay.model.ReplayRecord;
+import dev.nishisan.nstreamreplay.route.PartitionKey;
 import dev.nishisan.nstreamreplay.route.RouteTable;
 import dev.nishisan.nstreamreplay.sink.SinkTarget;
 import dev.nishisan.nstreamreplay.stats.ReplayMetrics;
@@ -57,6 +61,11 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
     private final Supplier<Consumer<byte[], byte[]>> consumerFactory;
     private final Duration pollTimeout;
     private final ConsumeRateLimiter rateLimiter;
+    private final Decoder decoder;
+    private final AtomicLong decodeErrors = new AtomicLong();
+    private final AtomicLong decodeDropped = new AtomicLong();
+    private final AtomicLong keyMissingDropped = new AtomicLong();
+    private final AtomicLong keyTypeDropped = new AtomicLong();
 
     private final AtomicLong consumedTotal = new AtomicLong();
     private final AtomicLong pollNanos = new AtomicLong();
@@ -81,6 +90,7 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
     SourceConsumer(SourceProperties props, RouteTable routes, ReplayMetrics metrics,
                    Supplier<Consumer<byte[], byte[]>> consumerFactory) {
         this.props = props;
+        this.decoder = Decoders.create(props.decoder());
         this.routes = routes;
         this.metrics = metrics;
         this.consumerFactory = consumerFactory;
@@ -158,15 +168,44 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
             limiterWaitNanos.addAndGet(System.nanoTime() - limiterStarted);
             consumedTotal.incrementAndGet();
             metrics.onConsumed(props.id());
+            JsonNode decoded = null;
+            boolean decodeAttempted = false;
+            boolean decodeFailed = false;
             Set<String> seen = new HashSet<>();
             for (RouteTable.Target target : routes.targetsFor(props.id(), record.topic())) {
                 String destinationTopic = target.resolveTopic(record.topic());
                 if (!seen.add(target.sink().id() + '\0' + destinationTopic)) {
                     continue;   // dedup de (sink, destino) idênticos no mesmo record
                 }
+                byte[] key = record.key();
+                if (target.partitionKey() != null) {
+                    if (!decodeAttempted) {
+                        decodeAttempted = true;
+                        try {
+                            decoded = decoder.decode(record.value());
+                        } catch (IOException e) {
+                            decodeFailed = true;
+                            decodeErrors.incrementAndGet();
+                        }
+                    }
+                    if (decodeFailed) {
+                        decodeDropped.incrementAndGet();
+                        continue;
+                    }
+                    PartitionKey.Result result = target.partitionKey().resolve(decoded);
+                    if (result.failure() != null) {
+                        if (result.failure() == PartitionKey.Failure.MISSING) {
+                            keyMissingDropped.incrementAndGet();
+                        } else {
+                            keyTypeDropped.incrementAndGet();
+                        }
+                        continue;
+                    }
+                    key = result.key();
+                }
                 long offerStarted = System.nanoTime();
                 try {
-                    target.sink().offer(toReplayRecord(record, destinationTopic));
+                    target.sink().offer(toReplayRecord(record, destinationTopic, key));
                 } finally {
                     offerNanos.addAndGet(System.nanoTime() - offerStarted);
                 }
@@ -198,13 +237,13 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
         }
     }
 
-    private static ReplayRecord toReplayRecord(ConsumerRecord<byte[], byte[]> r, String destinationTopic) {
+    private static ReplayRecord toReplayRecord(ConsumerRecord<byte[], byte[]> r, String destinationTopic, byte[] key) {
         Map<String, byte[]> headers = new LinkedHashMap<>();
         for (Header h : r.headers()) {
             headers.put(h.key(), h.value());
         }
         return new ReplayRecord(r.topic(), r.partition(), r.offset(), r.timestamp(),
-                r.key(), r.value(), headers, destinationTopic);
+                key, r.value(), headers, destinationTopic);
     }
 
     /**
@@ -264,6 +303,12 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
         return new TimingSnapshot(pollNanos.get(), limiterWaitNanos.get(), offerNanos.get(),
                 syncNanos.get(), commitNanos.get(), polledBatches.get());
     }
+
+    public RoutingSnapshot routingStats() {
+        return new RoutingSnapshot(decodeErrors.get(), decodeDropped.get(), keyMissingDropped.get(), keyTypeDropped.get());
+    }
+
+    public record RoutingSnapshot(long decodeErrors, long decodeDropped, long keyMissingDropped, long keyTypeDropped) { }
 
     public long configuredMaxConsumeRatePerSec() {
         return props.maxConsumeRatePerSec();

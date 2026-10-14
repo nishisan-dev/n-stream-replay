@@ -7,8 +7,8 @@ import java.util.Map;
 
 /**
  * Registro trafegado da origem para um destino, persistido na fila durável ({@code NQueue}
- * serializa via {@code ObjectOutputStream}, por isso {@link Serializable}). Não há transformação:
- * {@link #key} e {@link #value} são os bytes originais do Kafka. Carrega a <b>proveniência</b> da
+ * serializa via {@code ObjectOutputStream}, por isso {@link Serializable}). O payload mantém os bytes originais
+ * do Kafka; {@link #key} é a chave original ou a chave extraída pela rota antes de enfileirar. Carrega a <b>proveniência</b> da
  * origem ({@link #sourceTopic}/{@link #partition}/{@link #offset}) e o <b>tópico de destino</b>
  * resolvido pela rota ({@link #destinationTopic}) — uma fila por sink pode conter registros para
  * tópicos de destino diferentes, e o {@code KafkaSink} publica em {@link #destinationTopic}.

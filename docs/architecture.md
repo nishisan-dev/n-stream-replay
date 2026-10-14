@@ -106,4 +106,4 @@ mvn verify             # unit + ITs (Testcontainers Kafka)
 ./scripts/start.sh     # executa o jar com ./config/
 ```
 
-Java 25, Spring Boot 3.5.6, `kafka-clients` 3.9.0, `nishi-utils-core` 8.1.0, `nishi-utils-spring` 2.1.1.
+Java 25, Spring Boot 3.5.6, `kafka-clients` 3.9.1, `nishi-utils-core` 8.1.0, `nishi-utils-spring` 2.1.1.

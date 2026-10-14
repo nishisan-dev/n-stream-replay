@@ -78,9 +78,14 @@ atual; reprocessamentos após falha de commit podem contabilizar novamente o des
 
 ## Stack
 - Java 25, Spring Boot 3.5.6 (web servlet, apenas para expor métricas)
-- `kafka-clients` 3.9.0 (consumers/producers crus — sem Spring Kafka)
+- `kafka-clients` 3.9.1 (consumers/producers crus — sem Spring Kafka)
 - `dev.nishisan:nishi-utils-core:8.1.0` — `NQueue` (fila durável) + `StatsUtils` (métricas)
 - `dev.nishisan:nishi-utils-spring:2.1.1` — ponte `StatsUtils → Micrometer → /actuator/prometheus`
+
+O cliente Kafka 3.9.1 corrige o uso de `Subject.getSubject()` na autenticação
+SASL/SCRAM com Java 25. Não utilize o cliente 3.9.0 nessa combinação: ele pode falhar
+com `UnsupportedOperationException: getSubject is not supported`. O teste
+`ScramJavaCompatibilityTest` cobre a leitura das credenciais e o início do handshake.
 
 ## Build
 

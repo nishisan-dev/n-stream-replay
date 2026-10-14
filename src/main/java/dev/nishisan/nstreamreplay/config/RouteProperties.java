@@ -20,5 +20,17 @@ public record RouteProperties(
         @NotBlank String id,
         @NotBlank String source,
         @NotBlank String fromTopic,
-        @NotEmpty @Valid List<RouteTarget> to) {
+        @NotEmpty @Valid List<RouteTarget> to,
+        String decoder) {
+    @org.springframework.boot.context.properties.bind.ConstructorBinding
+    public RouteProperties { }
+
+    public RouteProperties(String id, String source, String fromTopic, List<RouteTarget> to) {
+        this(id, source, fromTopic, to, null);
+    }
+
+    public String effectiveDecoder(SourceProperties sourceProperties) {
+        return decoder == null ? sourceProperties.decoder() : decoder;
+    }
+
 }

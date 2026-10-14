@@ -20,8 +20,8 @@ orders.in (orders-src) ┤
 ## Decoder e chave de publicação
 
 Por padrão, `decoder: text` mantém o encaminhamento dos bytes originais. Para definir
-uma chave Kafka a partir do payload, configure `decoder: json` ou `decoder: yaml` no
-source e `partitionKey` no alvo da rota:
+uma chave Kafka a partir do payload, configure `decoder: json` ou `decoder: yaml` na
+rota e `partitionKey` no alvo da rota:
 
 ```yaml
 nstreamreplay:
@@ -29,7 +29,6 @@ nstreamreplay:
     - id: orders-src
       bootstrapServers: "localhost:9092"
       groupId: orders-relay
-      decoder: json
   sinks:
     - id: dc2-mirror
       bootstrapServers: "localhost:9092"
@@ -37,9 +36,18 @@ nstreamreplay:
     - id: orders-mirror
       source: orders-src
       fromTopic: orders.in
+      decoder: json
       to:
         - { sink: dc2-mirror, toTopic: orders.mirror, partitionKey: "payload.Id" }
 ```
+
+A precedência é **decoder da rota → decoder do source → `text`**. O campo no source
+continua aceito como padrão de compatibilidade com a v2.2.0. Assim, um único source
+pode consumir tópicos JSON e YAML, cada um com seu decoder na rota. O decode é
+compartilhado por formato dentro da mesma mensagem; uma falha em JSON não impede
+uma rota YAML de processá-la. `decodeErrors` conta a mensagem uma única vez mesmo
+quando mais de um formato falha. Alvos idênticos com chave configurada e decoders
+efetivos diferentes são considerados conflitantes e impedem o boot.
 
 `payload.Id` acessa uma propriedade aninhada; `id` acessa a raiz. Os nomes são
 sensíveis a maiúsculas. Cada segmento aceita letras, números, `_`, `$` e `-`;

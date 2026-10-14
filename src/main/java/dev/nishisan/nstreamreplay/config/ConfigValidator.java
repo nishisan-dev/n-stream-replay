@@ -46,13 +46,19 @@ public class ConfigValidator {
             }
             sources.put(source.id(), source);
         }
-        Map<Destination, String> policies = new HashMap<>();
+        Map<Destination, Policy> policies = new HashMap<>();
         List<RouteProperties> routes = props.routes() == null ? List.of() : props.routes();
         uniqueOrThrow(routes, RouteProperties::id, "route");
         for (RouteProperties route : routes) {
             if (!sourceIds.contains(route.source())) {
                 throw new IllegalStateException(
                         "rota '" + route.id() + "' referencia source inexistente: " + route.source());
+            }
+            String decoder = route.effectiveDecoder(sources.get(route.source()));
+            try {
+                Decoders.validate(decoder);
+            } catch (IllegalStateException e) {
+                throw new IllegalStateException("rota '" + route.id() + "': " + e.getMessage(), e);
             }
             for (RouteTarget target : route.to()) {
                 String context = "rota '" + route.id() + "', sink '" + target.sink() + "': ";
@@ -62,18 +68,19 @@ public class ConfigValidator {
                     } catch (IllegalStateException e) {
                         throw new IllegalStateException(context + e.getMessage(), e);
                     }
-                    if ("text".equals(sources.get(route.source()).decoder())) {
+                    if ("text".equals(decoder)) {
                         throw new IllegalStateException(context + "partitionKey exige decoder json ou yaml, não text");
                     }
                 }
                 String topic = target.toTopic() == null || target.toTopic().isBlank()
                         ? route.fromTopic() : target.toTopic();
                 Destination destination = new Destination(route.source(), route.fromTopic(), target.sink(), topic);
+                Policy policy = new Policy(target.partitionKey(), target.partitionKey() == null ? null : decoder);
                 if (policies.containsKey(destination)
-                        && !Objects.equals(policies.get(destination), target.partitionKey())) {
+                        && !Objects.equals(policies.get(destination), policy)) {
                     throw new IllegalStateException(context + "partitionKey conflitante para " + destination);
                 }
-                policies.put(destination, target.partitionKey());
+                policies.put(destination, policy);
                 if (!sinkIds.contains(target.sink())) {
                     throw new IllegalStateException(
                             "rota '" + route.id() + "' referencia sink inexistente: " + target.sink());
@@ -81,6 +88,8 @@ public class ConfigValidator {
             }
         }
     }
+
+    private record Policy(String partitionKey, String decoder) { }
 
     private record Destination(String source, String fromTopic, String sink, String toTopic) { }
 

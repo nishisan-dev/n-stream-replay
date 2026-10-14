@@ -282,4 +282,26 @@ class SourceConsumerTest {
             assertThat(queue.peekBatch().get(0).key()).isEqualTo("durable".getBytes(StandardCharsets.UTF_8));
         }
     }
+
+    @Test
+    void routesDecodeDifferentTopicsAndIsolateFormatsOnSameMessage() throws Exception {
+        FakeSinkTarget target = new FakeSinkTarget("d", false);
+        var routes = RouteTable.build(List.of(
+                new RouteProperties("json", "s1", "json-topic", List.of(new RouteTarget("d", "json-out", "id")), "json"),
+                new RouteProperties("yaml", "s1", "yaml-topic", List.of(new RouteTarget("d", "yaml-out", "id")), "yaml"),
+                new RouteProperties("wrong-format", "s1", "yaml-topic", List.of(new RouteTarget("d", "wrong-out", "id")), "json"),
+                new RouteProperties("wrong-again", "s1", "yaml-topic", List.of(new RouteTarget("d", "wrong-again", "id")), "json"),
+                new RouteProperties("raw", "s1", "yaml-topic", List.of(new RouteTarget("d", "raw-out")), "text")),
+                Map.of("d", target));
+        var consumer = new SourceConsumer(source("s1"), routes, NOOP);
+        consumer.enqueueBatch(new ConsumerRecords<>(Map.of(
+                new TopicPartition("json-topic", 0), List.of(kafkaRec("json-topic", 0, 0, "{\"id\":\"json-key\"}")),
+                new TopicPartition("yaml-topic", 0), List.of(kafkaRec("yaml-topic", 0, 0, "id: yaml-key\n")))));
+        assertThat(target.received).hasSize(3);
+        assertThat(target.received.stream().filter(r -> r.destinationTopic().equals("json-out")).findFirst().orElseThrow().key())
+                .isEqualTo("json-key".getBytes(StandardCharsets.UTF_8));
+        assertThat(target.received.stream().filter(r -> r.destinationTopic().equals("yaml-out")).findFirst().orElseThrow().key())
+                .isEqualTo("yaml-key".getBytes(StandardCharsets.UTF_8));
+        assertThat(consumer.routingStats()).isEqualTo(new SourceConsumer.RoutingSnapshot(1, 2, 0, 0));
+    }
 }

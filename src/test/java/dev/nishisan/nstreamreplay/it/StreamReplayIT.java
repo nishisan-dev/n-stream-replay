@@ -212,9 +212,9 @@ class StreamReplayIT {
         }
         SinkChannel sink = openSink("keys", bootstrap(), tmp);
         var routes = RouteTable.build(List.of(new RouteProperties("r", "keys-src", input,
-                List.of(new RouteTarget("keys", output, "payload.Id")))), Map.of("keys", sink));
+                List.of(new RouteTarget("keys", output, "payload.Id")), "json")), Map.of("keys", sink));
         var source = new SourceConsumer(new SourceProperties("keys-src", bootstrap(), "keys-source-group", null,
-                "earliest", 500, 200, 0, Map.of(), "json"), routes, NOOP);
+                "earliest", 500, 200, 0, Map.of()), routes, NOOP);
         Thread thread = new Thread(source, "keys-it-source");
         thread.start();
         try {

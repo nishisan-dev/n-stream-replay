@@ -20,7 +20,7 @@ nstreamreplay:
       maxPollRecords: 500
       pollTimeoutMs: 1000
       maxConsumeRatePerSec: 0              # teto de consumo em registros/s (0 = ilimitado)
-      decoder: text                       # text (default) | json | yaml; custom ainda indisponível
+      decoder: text                       # padrão opcional; decoder da rota tem precedência
       extraProps: {}                       # passthrough cru p/ o KafkaConsumer (SASL/TLS...)
 
   # ── DESTINOS (producers Kafka + fila durável; sem tópico fixo) ──────────────
@@ -45,10 +45,11 @@ nstreamreplay:
   routes:
     - id: orders-mirror
       source: orders-src
+      decoder: text                       # json | yaml | text; custom ainda indisponível
       fromTopic: orders.in                 # tópico consumido na origem
       to:
         - { sink: dc2-mirror, toTopic: orders.mirror }   # renomeia no destino
-        # Com decoder: json ou yaml no source, extrai a chave sem alterar o payload:
+        # Com decoder: json ou yaml nesta rota, extrai a chave sem alterar o payload:
         # - { sink: dc2-mirror, toTopic: orders.mirror, partitionKey: "payload.Id" }
         # Substitua o alvo acima; políticas diferentes para o mesmo destino impedem o boot.
         # - { sink: dc2-mirror }                          # (toTopic ausente = preserva "orders.in")

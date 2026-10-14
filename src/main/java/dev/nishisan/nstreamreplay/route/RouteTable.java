@@ -20,7 +20,10 @@ import java.util.Set;
 public final class RouteTable {
 
     /** Alvo resolvido: destino + tópico de destino (nulo/vazio = preserva o tópico de origem). */
-    public record Target(SinkTarget sink, String toTopic, PartitionKey partitionKey) {
+    public record Target(SinkTarget sink, String toTopic, PartitionKey partitionKey, String decoder) {
+        public Target(SinkTarget sink, String toTopic, PartitionKey partitionKey) {
+            this(sink, toTopic, partitionKey, null);
+        }
         public String resolveTopic(String sourceTopic) {
             return (toTopic == null || toTopic.isBlank()) ? sourceTopic : toTopic;
         }
@@ -51,7 +54,7 @@ public final class RouteTable {
                             "rota '" + route.id() + "' referencia sink inexistente: " + rt.sink());
                 }
                 targets.add(new Target(sink, rt.toTopic(),
-                        rt.partitionKey() == null ? null : new PartitionKey(rt.partitionKey())));
+                        rt.partitionKey() == null ? null : new PartitionKey(rt.partitionKey()), route.decoder()));
                 referenced.add(rt.sink());
             }
         }

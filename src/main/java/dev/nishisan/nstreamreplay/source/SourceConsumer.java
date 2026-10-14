@@ -61,7 +61,7 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
     private final Supplier<Consumer<byte[], byte[]>> consumerFactory;
     private final Duration pollTimeout;
     private final ConsumeRateLimiter rateLimiter;
-    private final Decoder decoder;
+    private final Map<String, Decoder> decoders = new LinkedHashMap<>();
     private final AtomicLong decodeErrors = new AtomicLong();
     private final AtomicLong decodeDropped = new AtomicLong();
     private final AtomicLong keyMissingDropped = new AtomicLong();
@@ -90,7 +90,14 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
     SourceConsumer(SourceProperties props, RouteTable routes, ReplayMetrics metrics,
                    Supplier<Consumer<byte[], byte[]>> consumerFactory) {
         this.props = props;
-        this.decoder = Decoders.create(props.decoder());
+        decoders.put(props.decoder(), Decoders.create(props.decoder()));
+        for (String topic : routes.topicsFor(props.id())) {
+            for (RouteTable.Target target : routes.targetsFor(props.id(), topic)) {
+                if (target.decoder() != null) {
+                    decoders.computeIfAbsent(target.decoder(), Decoders::create);
+                }
+            }
+        }
         this.routes = routes;
         this.metrics = metrics;
         this.consumerFactory = consumerFactory;
@@ -168,9 +175,8 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
             limiterWaitNanos.addAndGet(System.nanoTime() - limiterStarted);
             consumedTotal.incrementAndGet();
             metrics.onConsumed(props.id());
-            JsonNode decoded = null;
-            boolean decodeAttempted = false;
-            boolean decodeFailed = false;
+            Map<String, JsonNode> decoded = new LinkedHashMap<>();
+            Set<String> failedDecoders = new HashSet<>();
             Set<String> seen = new HashSet<>();
             for (RouteTable.Target target : routes.targetsFor(props.id(), record.topic())) {
                 String destinationTopic = target.resolveTopic(record.topic());
@@ -179,20 +185,20 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
                 }
                 byte[] key = record.key();
                 if (target.partitionKey() != null) {
-                    if (!decodeAttempted) {
-                        decodeAttempted = true;
+                    String format = target.decoder() == null ? props.decoder() : target.decoder();
+                    if (!decoded.containsKey(format) && !failedDecoders.contains(format)) {
                         try {
-                            decoded = decoder.decode(record.value());
+                            decoded.put(format, decoders.get(format).decode(record.value()));
                         } catch (IOException e) {
-                            decodeFailed = true;
-                            decodeErrors.incrementAndGet();
+                            if (failedDecoders.isEmpty()) decodeErrors.incrementAndGet();
+                            failedDecoders.add(format);
                         }
                     }
-                    if (decodeFailed) {
+                    if (failedDecoders.contains(format)) {
                         decodeDropped.incrementAndGet();
                         continue;
                     }
-                    PartitionKey.Result result = target.partitionKey().resolve(decoded);
+                    PartitionKey.Result result = target.partitionKey().resolve(decoded.get(format));
                     if (result.failure() != null) {
                         if (result.failure() == PartitionKey.Failure.MISSING) {
                             keyMissingDropped.incrementAndGet();

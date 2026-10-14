@@ -40,7 +40,10 @@ A aplicação é um **Spring Boot web servlet** apenas para expor métricas em `
 O `SourceConsumer` resolve `partitionKey` antes de chamar `offer`. Os alvos sem chave
 configurada preservam a chave Kafka de origem e não exigem decode válido. JSON e YAML
 são lidos como árvore, com rejeição de documentos adicionais e propriedades duplicadas.
-A leitura só ocorre uma vez por registro, compartilhada pelos alvos que precisam dela.
+A leitura só ocorre uma vez por formato por registro, compartilhada pelos alvos que precisam dela.
+O decoder da rota tem precedência sobre o decoder do source, cujo padrão é text.
+Rotas de um mesmo source podem usar formatos diferentes; falhas são isoladas por formato.
+O contador decode_errors_total conta mensagens, mesmo se múltiplos formatos falharem.
 
 A chave resolvida ocupa o campo `ReplayRecord.key` já existente, com UTF-8 para escalares.
 O formato serializado e `serialVersionUID` permanecem iguais; backlog antigo continua
@@ -51,7 +54,7 @@ Ausência/null e tombstones causam descarte por chave ausente; objetos/arrays ou
 por valor não-objeto causam descarte por tipo inválido. Erro de parsing descarta apenas
 os alvos que exigem chave. Esses descartes não entram na fila e permitem commit normal,
 após sincronizar os alvos válidos. Duplicatas de destino com política igual são deduplicadas;
-políticas diferentes (incluindo chave ausente) para o mesmo source/fromTopic/sink/toTopic
+políticas diferentes (incluindo chave ausente ou decoder efetivo diferente para extração) para o mesmo source/fromTopic/sink/toTopic
 resolvido impedem o boot, mesmo quando declaradas em rotas distintas.
 
 ## 5. Garantias de corretude

@@ -50,4 +50,25 @@ class DecoderStartupTest {
                 "nstreamreplay.routes[0].to[0].partitionKey=id", "nstreamreplay.routes[0].to[1].sink=d")
                 .run(context -> assertThat(context).hasFailed());
     }
+
+    @Test
+    void routeOverridesSourceAndRejectsInvalidEffectivePolicies() {
+        runner.withPropertyValues("nstreamreplay.routes[0].decoder=json",
+                "nstreamreplay.routes[0].to[0].partitionKey=id").run(context -> {
+                    assertThat(context).hasNotFailed();
+                    var props = context.getBean(NStreamReplayProperties.class);
+                    assertThat(props.routes().get(0).decoder()).isEqualTo("json");
+                    assertThat(props.sources().get(0).decoder()).isEqualTo("text");
+                });
+        runner.withPropertyValues("nstreamreplay.sources[0].decoder=json", "nstreamreplay.routes[0].decoder=yaml",
+                "nstreamreplay.routes[0].to[0].partitionKey=id").run(context -> assertThat(context).hasNotFailed());
+        for (String decoder : new String[]{"text", "custom", "unknown", ""}) {
+            runner.withPropertyValues("nstreamreplay.sources[0].decoder=json", "nstreamreplay.routes[0].decoder=" + decoder,
+                    "nstreamreplay.routes[0].to[0].partitionKey=id").run(context -> assertThat(context).hasFailed());
+        }
+        runner.withPropertyValues("nstreamreplay.routes[0].decoder=json", "nstreamreplay.routes[0].to[0].partitionKey=id",
+                "nstreamreplay.routes[1].id=r2", "nstreamreplay.routes[1].source=s", "nstreamreplay.routes[1].fromTopic=t",
+                "nstreamreplay.routes[1].decoder=yaml", "nstreamreplay.routes[1].to[0].sink=d",
+                "nstreamreplay.routes[1].to[0].partitionKey=id").run(context -> assertThat(context).hasFailed());
+    }
 }

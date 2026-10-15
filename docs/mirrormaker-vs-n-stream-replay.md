@@ -43,6 +43,16 @@ Kafka source
 
 This **decoupling is operationally useful** when destinations have different availability and latency characteristics. However, it is bounded by disk capacity, `maxDepth`, `retentionTime`, and failure policies. Records may be deliberately dropped if configured limits are exceeded.
 
+## Configuration simplicity: the real distinction
+
+**n-stream-replay is easier to express for selective event-forwarding workflows**, because the configuration directly exposes three concepts: `sources`, `sinks`, and `routes`. Each route maps a source topic to named destinations; each sink defines its own queue retention, durability, and write-error policy. No Kafka Connect connector resources or custom naming policy are needed for those supported behaviors.
+
+For example, **MirrorMaker 2's basic whole-topic A → B replication is already very concise** and can run with a small properties file in dedicated mode. We are *not* claiming fewer lines in every scenario. Its reference setup defines cluster aliases, broker addresses, and enabled replication flows; its additional machinery supports cluster metadata replication, discovery, checkpoints, and distributed scaling.
+
+In contrast, n-stream-replay makes **topic-by-topic routing, fan-out, renaming, per-target partition-key extraction, and per-destination persistent buffering** explicit in a single YAML configuration. The simplicity claim is therefore about expressing **that particular use case**, not universal ease of operation or a proven fewer-line count.
+
+See the [Apache Kafka official MirrorMaker 2 configuration examples](https://kafka.apache.org/42/operations/geo-replication-cross-cluster-data-mirroring/) and the [n-stream-replay sample YAML](../config/n-stream-replay.yaml).
+
 ## The important differences
 
 ### 1. Store-and-forward is not full Kafka cluster replication

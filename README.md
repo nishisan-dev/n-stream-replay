@@ -1,119 +1,186 @@
-# n-stream-replay
+# n-stream-replay — Durable Apache Kafka Store-and-Forward Relay
 
-Relay **Kafka store-and-forward** com **roteamento por tópico**: declaram-se **origens** (sources) e **destinos** (sinks) como conexões puras, e **rotas** que mapeiam um **tópico de origem → N alvos `{sink, toTopic?, partitionKey?}`** (de-para, fan-out, merge, espelho). O payload é preservado; a chave de publicação pode ser extraída de JSON ou YAML.
+[![Latest release](https://img.shields.io/github/v/release/nishisan-dev/n-stream-replay)](https://github.com/nishisan-dev/n-stream-replay/releases)
+[![License: GPL-3.0](https://img.shields.io/github/license/nishisan-dev/n-stream-replay)](LICENSE)
+![Java 25](https://img.shields.io/badge/Java-25-orange)
+![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-3.9.1-black)
 
-Cada **destino** possui uma **fila durável (NQueue, em disco)** própria. Se o destino fica offline, as mensagens dele ficam na fila e são **re-entregues quando ele volta** — sem travar a origem nem os demais destinos.
+**A lightweight Kafka MirrorMaker 2 alternative for durable event forwarding, cross-cluster topic routing, and disconnected destinations.**
 
+n-stream-replay is a **Java-based Kafka relay with disk-backed store-and-forward queues**. It consumes records from configured source topics, routes them to one or more Kafka destinations, and persists messages in an **independent durable queue per sink**. If a destination Kafka cluster goes offline, its backlog can be retried after recovery without blocking other destinations.
+
+Choose it for **Kafka topic mirroring, fan-out, many-to-one routing, topic renaming, resilient cross-datacenter event distribution, and intermittent network connectivity**. It is **not a drop-in replacement** for every Apache Kafka MirrorMaker 2 feature: it does not synchronize consumer-group checkpoints, ACLs, or topic configurations.
+
+**[Português (Brasil)](README.pt-BR.md)** · **[Architecture](docs/architecture.md)** · **[Complete configuration example](docs/usage-example.md)** · **[MirrorMaker 2 comparison](docs/mirrormaker-vs-n-stream-replay.md)** · **[Releases](https://github.com/nishisan-dev/n-stream-replay/releases)**
+
+## Why n-stream-replay?
+
+When a Kafka destination is unavailable, directly forwarding from a consumer to a producer can couple the source's progress to that destination's availability. n-stream-replay separates these responsibilities: **consume and persist locally, then forward independently per sink**.
+
+![n-stream-replay Kafka cross-cluster store-and-forward topology](docs/diagrams/topology.png)
+
+### Features
+
+- **Disk-backed store-and-forward:** one NQueue-based durable backlog per destination, surviving process restarts.
+- **Destination isolation:** an offline sink does not hold up the other sinks; pending records are retried with backoff when connectivity returns.
+- **Flexible topic routing:** mirror the original topic name, rename it, fan out a topic to multiple destinations, or merge several source topics into a destination topic.
+- **Payload preservation:** forward the original Kafka message payload without reserializing it; retain keys, headers, and timestamps unless a target explicitly overrides its key.
+- **Optional JSON/YAML partition keys:** extract a scalar from a configured payload field for a specific target; route-level decoder overrides a source-level default.
+- **Source-side rate limiting:** cap consumption using `maxConsumeRatePerSec`, or set it to `0` for no limit.
+- **Configurable durability and retention:** choose `sync-on-commit`, `per-record-fsync`, or `os-managed`; configure queue bounds and local write-error behavior.
+- **Prometheus observability:** source, sink, queue-depth, retry, throughput, and intentional-drop counters via Spring Boot Actuator.
+- **Direct Kafka clients:** built with `kafka-clients` rather than a Kafka Connect cluster or Spring Kafka.
+
+## How it works
+
+```text
+                         ┌──> [Durable NQueue: DR] ──> Kafka cluster DR
+Kafka source ──> Router ─┤
+                         └──> [Durable NQueue: analytics] ──> Kafka analytics
+                                |
+                                └── independent retry/backoff per destination
 ```
-                       ┌─ rota: orders.in → {dc2-mirror, toTopic=orders.mirror}
-orders.in (orders-src) ┤
-                       └─ rota: returns.in → {analytics}            (toTopic ausente = preserva)
-   origem (consome a união dos fromTopic) ──► fila-NQueue (por destino) ──► destino (no tópico da rota)
+
+1. A source consumer polls Kafka topics selected by the route definitions.
+2. Routing resolves the destination sinks, destination topic names, and any optional partition key.
+3. Each destination receives a copy in its own persistent queue.
+4. Under the default `sync-on-commit` policy, affected queues are synchronized to disk **before** the corresponding source offsets are committed.
+5. A separate forwarder per sink delivers queued records. Unavailable sinks retain their backlog subject to configured queue limits and retention.
+
+The delivery contract is **at-least-once**, not exactly-once. Retries or crashes can produce duplicates, so downstream consumers should be idempotent or deduplicate when required.
+
+## Quick start
+
+**Requirements:** JDK 25, Maven, a reachable Kafka broker, and resolvable `dev.nishisan` dependencies. The project uses `nishi-utils-core:8.1.0` and `nishi-utils-spring:2.1.1`. If the Spring companion artifact is not installed in your Maven environment, install it from its source checkout first:
+
+```bash
+mvn -f /path/to/nishi-utils-spring/pom.xml clean install
 ```
 
-- **de-para:** tópico A → sink X, tópico B → sink Y (rotas distintas).
-- **fan-out:** uma rota com vários `to` (1 tópico → N destinos).
-- **merge:** duas rotas com o mesmo `{sink, toTopic}` (N tópicos → 1 destino).
-- **espelho:** `toTopic` omitido → o destino preserva o nome do tópico de origem.
-- **rate limit por origem:** `maxConsumeRatePerSec` (registros/s; `0` = ilimitado) limita a taxa de consumo da origem.
+Clone, build, and start:
 
-## Decoder e chave de publicação
+```bash
+git clone https://github.com/nishisan-dev/n-stream-replay.git
+cd n-stream-replay
+mvn clean package
+./scripts/start.sh
+```
 
-Por padrão, `decoder: text` mantém o encaminhamento dos bytes originais. Para definir
-uma chave Kafka a partir do payload, configure `decoder: json` ou `decoder: yaml` na
-rota e `partitionKey` no alvo da rota:
+The included [configuration](config/n-stream-replay.yaml) targets `localhost:9092` for both source and sink; adapt the broker addresses, source topics, and destination topics before using it outside a local development setup. Destination topics and Kafka permissions must be prepared as required by your broker configuration.
+
+Health and Prometheus endpoints (when the default web port is available):
+
+```bash
+curl http://localhost:8080/actuator/health
+curl http://localhost:8080/actuator/prometheus
+```
+
+Run the unit and Kafka/Testcontainers integration test suite with Docker available:
+
+```bash
+mvn verify
+```
+
+## Example: Kafka replication with fan-out and topic remapping
+
+The YAML below routes `orders.events` to two different Kafka clusters. One keeps the topic name; the other publishes to `orders.analytics` and derives the partition key from a JSON field.
 
 ```yaml
 nstreamreplay:
   sources:
-    - id: orders-src
-      bootstrapServers: "localhost:9092"
-      groupId: orders-relay
+    - id: orders-source
+      bootstrapServers: "kafka-primary:9092"
+      groupId: "n-stream-replay.orders"
+      autoOffsetReset: earliest
+
   sinks:
-    - id: dc2-mirror
-      bootstrapServers: "localhost:9092"
+    - id: disaster-recovery
+      bootstrapServers: "kafka-dr:9092"
+      queue:
+        basePath: "var/n-stream-replay/queues"
+        maxDepth: 1000000
+        retentionTime: 0s
+        durability: sync-on-commit
+        onWriteError: halt
+
+    - id: analytics
+      bootstrapServers: "kafka-analytics:9092"
+      queue:
+        basePath: "var/n-stream-replay/queues"
+        maxDepth: 200000
+        retentionTime: 6h
+        durability: sync-on-commit
+        onWriteError: drop
+
   routes:
-    - id: orders-mirror
-      source: orders-src
-      fromTopic: orders.in
+    - id: orders-to-both
+      source: orders-source
+      fromTopic: orders.events
       decoder: json
       to:
-        - { sink: dc2-mirror, toTopic: orders.mirror, partitionKey: "payload.Id" }
+        - { sink: disaster-recovery, toTopic: orders.events }
+        - { sink: analytics, toTopic: orders.analytics, partitionKey: "payload.customerId" }
 ```
 
-A precedência é **decoder da rota → decoder do source → `text`**. O campo no source
-continua aceito como padrão de compatibilidade com a v2.2.0. Assim, um único source
-pode consumir tópicos JSON e YAML, cada um com seu decoder na rota. O decode é
-compartilhado por formato dentro da mesma mensagem; uma falha em JSON não impede
-uma rota YAML de processá-la. `decodeErrors` conta a mensagem uma única vez mesmo
-quando mais de um formato falha. Alvos idênticos com chave configurada e decoders
-efetivos diferentes são considerados conflitantes e impedem o boot.
+This is an **illustrative configuration**, not a zero-data-loss guarantee. A queue can intentionally discard old messages when `maxDepth` or `retentionTime` limits are reached, even if records were originally persisted. `onWriteError: halt` concerns **local queue write errors**; it does not turn bounded retention into unlimited storage. See the [production-style AcmePay scenario](docs/usage-example.md) for more settings, examples, and operational tradeoffs.
 
-`payload.Id` acessa uma propriedade aninhada; `id` acessa a raiz. Os nomes são
-sensíveis a maiúsculas. Cada segmento aceita letras, números, `_`, `$` e `-`;
-o ponto separa propriedades. Não há indexação de arrays, curingas, expressões nem
-escape para nomes contendo ponto.
+### Routing modes
 
-- Strings (inclusive vazias), números e booleanos viram a chave em UTF-8, sem aspas
-  JSON e sem remover espaços. A chave original é substituída apenas nesse alvo.
-- Campo ausente/null, objeto/array ou payload inválido descartam **somente os alvos
-  que exigem a chave**. Tombstones são tratados como chave ausente. A aplicação
-  continua e confirma os offsets após processar/sincronizar os demais alvos.
-- Sem `partitionKey`, a chave e o payload originais são preservados, mesmo se o
-  payload não puder ser decodificado. O decoder é executado somente quando necessário.
-- O payload nunca é reserializado. A chave extraída é gravada na fila durável antes
-  do commit e permanece igual após retries, reinícios ou mudança de configuração.
-- Decoder desconhecido, `custom` (reservado para o futuro), caminho inválido,
-  `partitionKey` com `text` e políticas conflitantes para um mesmo destino impedem
-  o boot. JSON/YAML devem conter um único documento; propriedades duplicadas são inválidas.
+| Mode | Configuration idea | Result |
+| --- | --- | --- |
+| Topic mirror | Omit `toTopic` | Source and target topic names match |
+| Topic rename | Set `toTopic: orders.mirror` | Forward to another topic name |
+| Fan-out | Multiple `to` targets | One source topic to multiple destinations |
+| Merge | Multiple routes share a sink and `toTopic` | Multiple source topics to one destination topic |
+| Key extraction | `decoder: json` or `yaml` plus `partitionKey` on a target | Set the Kafka key from a scalar payload field |
+| Rate limiting | `maxConsumeRatePerSec` on a source | Bound ingestion rate per source |
 
-O Kafka escolhe a partição pela chave usando o producer configurado. O recurso serve
-para mensagens sem chave em uma origem de uma partição e também para outras topologias.
-As opções Kafka em `extraProps` continuam sob responsabilidade da configuração do producer.
+## Reliability, boundaries, and operations
 
-Os stats incluem `decodeErrors` (por mensagem), `decodeDropped`, `keyMissingDropped`
-e `keyTypeDropped` (por alvo deduplicado). Também são expostos por source no Prometheus;
-veja os nomes completos na [arquitetura](docs/architecture.md). São contadores da execução
-atual; reprocessamentos após falha de commit podem contabilizar novamente o descarte.
+**Durability:** `sync-on-commit` (default) syncs affected destination queues before source offset commits. `per-record-fsync` makes each queue insertion more conservative at a throughput cost; `os-managed` is faster but accepts a larger crash-loss window.
 
-## Stack
-- Java 25, Spring Boot 3.5.6 (web servlet, apenas para expor métricas)
-- `kafka-clients` 3.9.1 (consumers/producers crus — sem Spring Kafka)
-- `dev.nishisan:nishi-utils-core:8.1.0` — `NQueue` (fila durável) + `StatsUtils` (métricas)
-- `dev.nishisan:nishi-utils-spring:2.1.1` — ponte `StatsUtils → Micrometer → /actuator/prometheus`
+**Delivery:** at-least-once. There is no exactly-once delivery or built-in duplicate suppression.
 
-O cliente Kafka 3.9.1 corrige o uso de `Subject.getSubject()` na autenticação
-SASL/SCRAM com Java 25. Não utilize o cliente 3.9.0 nessa combinação: ele pode falhar
-com `UnsupportedOperationException: getSubject is not supported`. O teste
-`ScramJavaCompatibilityTest` cobre a leitura das credenciais e o início do handshake.
+**Bounded queues:** `maxDepth` and `retentionTime` can drop old, undelivered records. Track `dropped`, `expired`, and routing-drop metrics and alert on nonzero increases. Provision disks and choose queue limits consistent with your outage tolerance.
 
-## Build
+**Errors:** transient destination failures are retried. Non-retryable/oversized records can be discarded as poisoned records. Invalid extracted partition keys can cause target-specific drops without corrupting the payload for other routes.
 
-> **Pré-requisito (uma vez):** publicar `nishi-utils-spring:2.1.1` no `~/.m2` local:
-> ```bash
-> mvn -f /home/lucas/Projects/nishisan/nishi-utils-spring/pom.xml clean install
-> ```
+**Metadata scope:** this is an event relay, **not** a Kafka-cluster metadata replication system. Topic creation/configuration, ACL mirroring, and consumer-group offset synchronization are outside its current scope.
 
-```bash
-mvn clean package          # gera o fat jar executável em target/n-stream-replay-<versão>.jar
-```
+**Monitoring:** view `/actuator/prometheus` for `nstreamreplay_*` metrics, including per-sink queue depth and online status. Detailed names and correctness guarantees are documented in [architecture](docs/architecture.md).
 
-## Execução
-```bash
-./scripts/start.sh         # usa target/n-stream-replay-*.jar + ./config/
-# ou
-java -jar target/n-stream-replay-*.jar --spring.config.additional-location=file:./config/
-```
+## n-stream-replay vs. Apache Kafka MirrorMaker 2
 
-- Configuração de app: [`config/n-stream-replay.yaml`](config/n-stream-replay.yaml) (sources/sinks/routes).
-- Métricas: `GET http://localhost:8080/actuator/prometheus` (séries `nstreamreplay_*`).
-- Health: `GET http://localhost:8080/actuator/health`.
+Use **n-stream-replay** when you specifically need **persistent local queues per destination, fine-grained per-topic routing, selective key extraction, or independent handling of offline Kafka sinks**.
 
-## Garantias e contrato
-- **At-least-once.** Após crash/restart pode haver **duplicatas** no destino — sinks devem tolerar redelivery. Não há dedup nem exactly-once no MVP.
-- **Durabilidade `sync-on-commit` (default):** o offset da origem só é commitado depois que o lote foi gravado e sincronizado (`fsync`) em todas as filas-destino.
-- **Bounded drop-oldest:** cada fila é limitada por `maxDepth` (contagem) e/ou `retentionTime` (tempo); ao estourar, os registros **mais antigos não entregues são descartados** (perda intencional, contabilizada em `dropped`/`expired`).
+Use **MirrorMaker 2** when you need the established Kafka Connect-based replication toolchain, including **consumer-group checkpoints, topic configuration replication, and ACL synchronization**.
 
-## Documentação
-- [Arquitetura](docs/architecture.md) — componentes, garantias de corretude, métricas.
-- [Exemplo de uso (AcmePay)](docs/usage-example.md) — cenário real de espelhamento entre datacenters, com [config pronta](docs/examples/acmepay-relay.yaml).
+Both can support inter-cluster topic replication and fan-out. This project does **not** claim to outperform MirrorMaker 2 in throughput, latency, or reliability without controlled benchmarks.
+
+Read the [feature-by-feature comparison and migration considerations](docs/mirrormaker-vs-n-stream-replay.md).
+
+## Technical stack
+
+- **Java:** 25
+- **Spring Boot:** 3.5.6 (web servlet for health and metrics)
+- **Apache Kafka client:** 3.9.1 (raw KafkaConsumer/KafkaProducer APIs)
+- **Durable queue:** `dev.nishisan:nishi-utils-core:8.1.0` / NQueue
+- **Metrics bridge:** `dev.nishisan:nishi-utils-spring:2.1.1` / Micrometer + Prometheus
+
+For Java 25 with SASL/SCRAM, this version uses Kafka client 3.9.1 and includes a compatibility test for the `Subject.getSubject()` issue encountered with client 3.9.0.
+
+## Documentation
+
+- [Architecture, correctness guarantees, and metrics](docs/architecture.md)
+- [End-to-end multi-datacenter Kafka relay example](docs/usage-example.md)
+- [Full example YAML](docs/examples/acmepay-relay.yaml)
+- [Default sample configuration](config/n-stream-replay.yaml)
+- [MirrorMaker 2 comparison](docs/mirrormaker-vs-n-stream-replay.md)
+- [Portuguese README](README.pt-BR.md)
+- [Release history](https://github.com/nishisan-dev/n-stream-replay/releases)
+
+## License
+
+Distributed under the [GNU General Public License v3.0](LICENSE). See the license file for terms.
+
+If this project solves an event-delivery problem for you, consider **starring the repository** to help other Kafka developers discover it.

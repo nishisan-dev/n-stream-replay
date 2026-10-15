@@ -21,6 +21,7 @@ When a Kafka destination is unavailable, directly forwarding from a consumer to 
 
 ### Features
 
+- **Simple declarative YAML:** define `sources`, `sinks`, and `routes` directly, without creating Kafka Connect connector resources or writing custom routing plugins for this use case.
 - **Disk-backed store-and-forward:** one NQueue-based durable backlog per destination, surviving process restarts.
 - **Destination isolation:** an offline sink does not hold up the other sinks; pending records are retried with backoff when connectivity returns.
 - **Flexible topic routing:** mirror the original topic name, rename it, fan out a topic to multiple destinations, or merge several source topics into a destination topic.

@@ -304,4 +304,29 @@ class SourceConsumerTest {
                 .isEqualTo("yaml-key".getBytes(StandardCharsets.UTF_8));
         assertThat(consumer.routingStats()).isEqualTo(new SourceConsumer.RoutingSnapshot(1, 2, 0, 0));
     }
+
+    @Test
+    void preserveCarregaAParticaoDeOrigemEKeyModeNao() throws Exception {
+        FakeSinkTarget preserved = new FakeSinkTarget("p", false);
+        FakeSinkTarget keyed = new FakeSinkTarget("k", false);
+        RouteTable routes = RouteTable.build(List.of(new RouteProperties("r", "s1", "cdc", List.of(
+                new RouteTarget("p", "cdc.mirror", null, dev.nishisan.nstreamreplay.config.Partitioning.PRESERVE),
+                new RouteTarget("k", "cdc.mirror")))), Map.of("p", preserved, "k", keyed));
+        SourceConsumer consumer = new SourceConsumer(source("s1"), routes, NOOP, () -> {
+            throw new IllegalStateException("não usa consumer neste teste");
+        });
+        byte[] controlKey = "__nishidb_control__".getBytes(StandardCharsets.UTF_8);
+        Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> batch = new LinkedHashMap<>();
+        for (int partition = 0; partition < 4; partition++) {
+            batch.put(new TopicPartition("cdc", partition), List.of(
+                    new ConsumerRecord<>("cdc", partition, 0L, controlKey, "reset".getBytes(StandardCharsets.UTF_8))));
+        }
+
+        consumer.enqueueBatch(new ConsumerRecords<>(batch));
+
+        assertThat(preserved.received).extracting(ReplayRecord::destinationPartition)
+                .containsExactly(0, 1, 2, 3);
+        assertThat(preserved.received).extracting(ReplayRecord::key).allSatisfy(k -> assertThat(k).isEqualTo(controlKey));
+        assertThat(keyed.received).extracting(ReplayRecord::destinationPartition).containsOnlyNulls();
+    }
 }

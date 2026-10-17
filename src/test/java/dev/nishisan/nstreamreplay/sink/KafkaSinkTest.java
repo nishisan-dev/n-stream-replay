@@ -123,4 +123,26 @@ class KafkaSinkTest {
             assertThat(outcome.acked()).isEqualTo(1);        // prefixo para no transitório
         }
     }
+
+    @Test
+    void publicaNaParticaoDeDestinoPreservandoKeyCruaEHeaders() {
+        ScriptedProducer producer = new ScriptedProducer();
+        byte[] rawKey = {0, (byte) 0xFF, 0x7F, (byte) 0x80};   // bytes não-UTF-8
+        Map<String, byte[]> headers = new java.util.LinkedHashMap<>();
+        headers.put("nishidb-reason", "reset".getBytes(StandardCharsets.UTF_8));
+        headers.put("empty", null);
+        ReplayRecord pinned = new ReplayRecord("cdc", 2, 10L, 5L, rawKey, new byte[]{9}, headers, "cdc.mirror", 2);
+        ReplayRecord byKey = new ReplayRecord("cdc", 2, 11L, 5L, rawKey, new byte[]{9}, Map.of(), "cdc.mirror");
+        try (KafkaSink sink = new KafkaSink(producer, 0)) {
+            PublishOutcome outcome = sink.publish(List.of(pinned, byKey));
+            assertThat(outcome.published()).isEqualTo(2);
+        }
+        assertThat(producer.sent.get(0).partition()).isEqualTo(2);
+        assertThat(producer.sent.get(0).key()).isEqualTo(rawKey);
+        assertThat(producer.sent.get(0).headers().lastHeader("nishidb-reason").value())
+                .isEqualTo("reset".getBytes(StandardCharsets.UTF_8));
+        assertThat(producer.sent.get(0).headers().lastHeader("empty").value()).isNull();
+        assertThat(producer.sent.get(1).partition()).isNull();   // sem partição = pela key
+        assertThat(producer.sent.get(1).key()).isEqualTo(rawKey);
+    }
 }

@@ -149,4 +149,27 @@ class NStreamReplayPropertiesBindingTest {
 
         assertThat(props.routes().get(0).to().get(0).sink()).isEqualTo("d1");
     }
+
+    @Test
+    void ligaPartitioningDoAlvoComDefaultKey() {
+        String yaml = """
+                nstreamreplay:
+                  sources:
+                    - { id: s1, bootstrapServers: "host:9092", groupId: "g" }
+                  sinks:
+                    - { id: d1, bootstrapServers: "host:9092" }
+                  routes:
+                    - id: r1
+                      source: s1
+                      fromTopic: cdc
+                      to:
+                        - { sink: d1, toTopic: cdc.mirror, partitioning: preserve }
+                        - { sink: d1, toTopic: cdc.keyed }
+                """;
+
+        List<RouteTarget> to = bind(yaml).routes().get(0).to();
+
+        assertThat(to.get(0).partitioning()).isEqualTo(Partitioning.PRESERVE);
+        assertThat(to.get(1).partitioning()).isEqualTo(Partitioning.KEY);
+    }
 }

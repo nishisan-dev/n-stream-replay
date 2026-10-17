@@ -72,13 +72,20 @@ public class ConfigValidator {
                         throw new IllegalStateException(context + "partitionKey exige decoder json ou yaml, não text");
                     }
                 }
+                if (target.preservesPartition() && target.partitionKey() != null) {
+                    throw new IllegalStateException(context
+                            + "partitioning=preserve é incompatível com partitionKey (preserve mantém a partição "
+                            + "da origem; partitionKey escolhe a partição pela key). Use um dos dois");
+                }
                 String topic = target.toTopic() == null || target.toTopic().isBlank()
                         ? route.fromTopic() : target.toTopic();
                 Destination destination = new Destination(route.source(), route.fromTopic(), target.sink(), topic);
-                Policy policy = new Policy(target.partitionKey(), target.partitionKey() == null ? null : decoder);
+                Policy policy = new Policy(target.partitionKey(), target.partitionKey() == null ? null : decoder,
+                        target.partitioning());
                 if (policies.containsKey(destination)
                         && !Objects.equals(policies.get(destination), policy)) {
-                    throw new IllegalStateException(context + "partitionKey conflitante para " + destination);
+                    throw new IllegalStateException(context
+                            + "partitionKey/partitioning conflitante para " + destination);
                 }
                 policies.put(destination, policy);
                 if (!sinkIds.contains(target.sink())) {
@@ -89,7 +96,7 @@ public class ConfigValidator {
         }
     }
 
-    private record Policy(String partitionKey, String decoder) { }
+    private record Policy(String partitionKey, String decoder, Partitioning partitioning) { }
 
     private record Destination(String source, String fromTopic, String sink, String toTopic) { }
 

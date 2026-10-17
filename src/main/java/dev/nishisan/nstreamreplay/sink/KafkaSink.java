@@ -139,8 +139,10 @@ public final class KafkaSink implements Sink {
         for (Map.Entry<String, byte[]> h : rec.headers().entrySet()) {
             headers.add(new RecordHeader(h.getKey(), h.getValue()));
         }
-        // partition=null: o producer particiona por key (preserva ordem por chave no destino).
-        return new ProducerRecord<>(rec.destinationTopic(), null, ts, rec.key(), rec.value(), headers);
+        // destinationPartition=null: o producer particiona por key (preserva ordem por chave no destino).
+        // Preenchida (partitioning: preserve): a partição é fixa e a key segue intacta, em bytes crus.
+        return new ProducerRecord<>(rec.destinationTopic(), rec.destinationPartition(), ts,
+                rec.key(), rec.value(), headers);
     }
 
     private boolean isOversize(ReplayRecord rec) {

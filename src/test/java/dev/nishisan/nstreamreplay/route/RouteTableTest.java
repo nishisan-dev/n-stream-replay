@@ -61,4 +61,15 @@ class RouteTableTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("fantasma");
     }
+
+    @Test
+    void alvoCarregaOModoDeParticao() {
+        RouteTable t = RouteTable.build(List.of(new RouteProperties("r", "s1", "cdc", List.of(
+                new RouteTarget("a", "cdc.mirror", null, dev.nishisan.nstreamreplay.config.Partitioning.PRESERVE),
+                new RouteTarget("a", "cdc.keyed")))), sinks("a"));
+
+        List<RouteTable.Target> targets = t.targetsFor("s1", "cdc");
+        assertThat(targets.get(0).preservesPartition()).isTrue();
+        assertThat(targets.get(1).preservesPartition()).isFalse();   // default = key
+    }
 }

@@ -84,4 +84,49 @@ class ReplayRecordTest {
             assertThat(record.headers().get("header")).containsExactly((byte) 1, (byte) 2);
         }
     }
+
+    @Test
+    void registroGravadoPorVersaoAnteriorDecodificaSemParticaoDeDestino() throws Exception {
+        // O fixture foi serializado antes de existir destinationPartition (formato da fila das
+        // v2.x). Após o upgrade, a fila em disco deve continuar legível: sem partição = particionar
+        // pela key (comportamento histórico).
+        try (var input = new java.io.ObjectInputStream(getClass().getResourceAsStream("/fixtures/replay-record-v2.ser"))) {
+            ReplayRecord record = (ReplayRecord) input.readObject();
+            assertThat(record.destinationPartition()).isNull();
+            assertThat(record.destinationTopic()).isEqualTo("legacy.out");
+        }
+    }
+
+    @Test
+    void particaoDeDestinoSobreviveAoRoundTrip() throws Exception {
+        ReplayRecord original = new ReplayRecord("cdc", 3, 7L, 1L,
+                "__control__".getBytes(StandardCharsets.UTF_8), new byte[]{1}, Map.of(), "cdc.mirror", 3);
+
+        ReplayRecord restored = roundTrip(original);
+
+        assertThat(restored.destinationPartition()).isEqualTo(3);
+        assertThat(restored).isEqualTo(original);
+        assertThat(restored).isNotEqualTo(new ReplayRecord("cdc", 3, 7L, 1L,
+                "__control__".getBytes(StandardCharsets.UTF_8), new byte[]{1}, Map.of(), "cdc.mirror", null));
+    }
+
+    @Test
+    void rejeitaParticaoDeDestinoNegativa() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new ReplayRecord("t", 0, 1L, 0L,
+                null, null, Map.of(), "t", -1)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void headersPreservamOrdemEAceitamValorNulo() throws Exception {
+        Map<String, byte[]> headers = new LinkedHashMap<>();
+        headers.put("z-first", new byte[]{1});
+        headers.put("a-null", null);
+        headers.put("m-last", new byte[]{3});
+
+        ReplayRecord restored = roundTrip(new ReplayRecord("t", 0, 1L, 0L, null, null, headers, "t"));
+
+        assertThat(restored.headers().keySet()).containsExactly("z-first", "a-null", "m-last");
+        assertThat(restored.headers().get("a-null")).isNull();
+        assertThat(restored.headers().get("m-last")).containsExactly((byte) 3);
+    }
 }

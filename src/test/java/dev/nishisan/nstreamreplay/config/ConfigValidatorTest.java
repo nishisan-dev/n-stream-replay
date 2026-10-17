@@ -152,4 +152,37 @@ class ConfigValidatorTest {
         }
         assertThatCode(() -> ConfigValidator.validate(keyedConfig("text", null, null))).doesNotThrowAnyException();
     }
+
+    private static NStreamReplayProperties preserveConfig(String decoder, RouteTarget... targets) {
+        SourceProperties source = new SourceProperties("s", "b:9092", "g", null, "latest", 500, 1000L, 0L,
+                Map.of(), decoder);
+        return cfg(List.of(source), List.of(sink("d")),
+                List.of(new RouteProperties("r", "s", "cdc", List.of(targets))));
+    }
+
+    @Test
+    void rejeitaPreserveComPartitionKey() {
+        NStreamReplayProperties props = preserveConfig("json",
+                new RouteTarget("d", "cdc.mirror", "payload.Id", Partitioning.PRESERVE));
+        assertThatThrownBy(() -> ConfigValidator.validate(props))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("rota 'r'").hasMessageContaining("sink 'd'")
+                .hasMessageContaining("preserve").hasMessageContaining("partitionKey");
+    }
+
+    @Test
+    void aceitaPreserveComESemToTopic() {
+        assertThatCode(() -> ConfigValidator.validate(preserveConfig("text",
+                new RouteTarget("d", "cdc.mirror", null, Partitioning.PRESERVE)))).doesNotThrowAnyException();
+        assertThatCode(() -> ConfigValidator.validate(preserveConfig("text",
+                new RouteTarget("d", null, null, Partitioning.PRESERVE)))).doesNotThrowAnyException();
+    }
+
+    @Test
+    void rejeitaPreserveEKeyConflitantesParaOMesmoDestino() {
+        NStreamReplayProperties props = preserveConfig("text",
+                new RouteTarget("d", "cdc.mirror", null, Partitioning.PRESERVE),
+                new RouteTarget("d", "cdc.mirror", null, Partitioning.KEY));
+        assertThatThrownBy(() -> ConfigValidator.validate(props)).hasMessageContaining("conflitante");
+    }
 }

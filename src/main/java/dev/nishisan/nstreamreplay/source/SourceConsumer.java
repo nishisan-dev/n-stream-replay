@@ -211,7 +211,9 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
                 }
                 long offerStarted = System.nanoTime();
                 try {
-                    target.sink().offer(toReplayRecord(record, destinationTopic, key));
+                    // preserve: a partição de origem vira a partição de destino; nula = pela key.
+                    Integer destinationPartition = target.preservesPartition() ? record.partition() : null;
+                    target.sink().offer(toReplayRecord(record, destinationTopic, key, destinationPartition));
                 } finally {
                     offerNanos.addAndGet(System.nanoTime() - offerStarted);
                 }
@@ -243,13 +245,14 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
         }
     }
 
-    private static ReplayRecord toReplayRecord(ConsumerRecord<byte[], byte[]> r, String destinationTopic, byte[] key) {
+    private static ReplayRecord toReplayRecord(ConsumerRecord<byte[], byte[]> r, String destinationTopic,
+                                               byte[] key, Integer destinationPartition) {
         Map<String, byte[]> headers = new LinkedHashMap<>();
         for (Header h : r.headers()) {
             headers.put(h.key(), h.value());
         }
         return new ReplayRecord(r.topic(), r.partition(), r.offset(), r.timestamp(),
-                key, r.value(), headers, destinationTopic);
+                key, r.value(), headers, destinationTopic, destinationPartition);
     }
 
     /**

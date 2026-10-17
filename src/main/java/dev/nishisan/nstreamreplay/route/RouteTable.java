@@ -1,5 +1,6 @@
 package dev.nishisan.nstreamreplay.route;
 
+import dev.nishisan.nstreamreplay.config.Partitioning;
 import dev.nishisan.nstreamreplay.config.RouteProperties;
 import dev.nishisan.nstreamreplay.config.RouteTarget;
 import dev.nishisan.nstreamreplay.sink.SinkTarget;
@@ -19,10 +20,27 @@ import java.util.Set;
  */
 public final class RouteTable {
 
-    /** Alvo resolvido: destino + tópico de destino (nulo/vazio = preserva o tópico de origem). */
-    public record Target(SinkTarget sink, String toTopic, PartitionKey partitionKey, String decoder) {
+    /**
+     * Alvo resolvido: destino + tópico de destino (nulo/vazio = preserva o tópico de origem) e o
+     * modo de partição de destino ({@link Partitioning}).
+     */
+    public record Target(SinkTarget sink, String toTopic, PartitionKey partitionKey, String decoder,
+                         Partitioning partitioning) {
+        public Target {
+            partitioning = partitioning == null ? Partitioning.KEY : partitioning;
+        }
+
+        public Target(SinkTarget sink, String toTopic, PartitionKey partitionKey, String decoder) {
+            this(sink, toTopic, partitionKey, decoder, Partitioning.KEY);
+        }
+
         public Target(SinkTarget sink, String toTopic, PartitionKey partitionKey) {
-            this(sink, toTopic, partitionKey, null);
+            this(sink, toTopic, partitionKey, null, Partitioning.KEY);
+        }
+
+        /** O registro deve ser publicado na mesma partição que tinha na origem? */
+        public boolean preservesPartition() {
+            return partitioning == Partitioning.PRESERVE;
         }
         public String resolveTopic(String sourceTopic) {
             return (toTopic == null || toTopic.isBlank()) ? sourceTopic : toTopic;
@@ -54,7 +72,8 @@ public final class RouteTable {
                             "rota '" + route.id() + "' referencia sink inexistente: " + rt.sink());
                 }
                 targets.add(new Target(sink, rt.toTopic(),
-                        rt.partitionKey() == null ? null : new PartitionKey(rt.partitionKey()), route.decoder()));
+                        rt.partitionKey() == null ? null : new PartitionKey(rt.partitionKey()), route.decoder(),
+                        rt.partitioning()));
                 referenced.add(rt.sink());
             }
         }

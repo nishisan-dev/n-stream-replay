@@ -2,6 +2,7 @@ package dev.nishisan.nstreamreplay.sink;
 
 import dev.nishisan.nstreamreplay.config.Durability;
 import dev.nishisan.nstreamreplay.config.OnWriteError;
+import dev.nishisan.nstreamreplay.config.OverflowPolicy;
 import dev.nishisan.nstreamreplay.config.QueueProperties;
 import dev.nishisan.nstreamreplay.model.ReplayRecord;
 import dev.nishisan.utils.queue.NQueue;
@@ -347,6 +348,71 @@ class DurableSinkQueueTest {
             assertThat(delivered).hasSize(total);
             assertThat(delivered).isEqualTo(IntStream.range(0, total).boxed().toList());
             assertThat(q.depth()).isZero();
+        }
+    }
+
+    private static QueueProperties blockCfg(Path tmp, int maxDepth, int batchSize) {
+        return new QueueProperties(tmp.toString(), maxDepth, Duration.ZERO, Durability.OS_MANAGED,
+                OnWriteError.HALT, batchSize, 1000L, OverflowPolicy.BLOCK);
+    }
+
+    @Test
+    void blockNuncaDescartaAcimaDoMaxDepthEPreservaOrdem(@TempDir Path tmp) throws Exception {
+        try (DurableSinkQueue q = DurableSinkQueue.open("s", blockCfg(tmp, 3, 2))) {
+            for (int i = 1; i <= 10; i++) {
+                assertThat(q.offer(rec(i))).isTrue();
+            }
+            assertThat(q.depth()).isEqualTo(10);
+            assertThat(q.dropped()).isZero();
+            assertThat(drainAll(q)).containsExactly(1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+        }
+    }
+
+    @Test
+    void blockSaturaNoMaxDepthEVoltaSoNaMarcaDaguaBaixa(@TempDir Path tmp) throws Exception {
+        try (DurableSinkQueue q = DurableSinkQueue.open("s", blockCfg(tmp, 6, 1))) {
+            for (int i = 1; i <= 5; i++) {
+                q.offer(rec(i));
+            }
+            assertThat(q.saturated()).isFalse();   // 5 < 6
+            q.offer(rec(6));
+            assertThat(q.saturated()).isTrue();    // 6 >= maxDepth
+
+            // histerese: a marca d'água baixa é maxDepth/2 = 3; em 5 e 4 ainda saturado
+            q.peekBatch();
+            q.ack(1);                              // depth 5
+            q.peekBatch();
+            q.ack(1);                              // depth 4
+            assertThat(q.saturated()).isTrue();
+            q.peekBatch();
+            q.ack(1);                              // depth 3 == maxDepth/2
+            assertThat(q.saturated()).isFalse();
+        }
+    }
+
+    @Test
+    void dropOldestNuncaReportaSaturacao(@TempDir Path tmp) throws Exception {
+        try (DurableSinkQueue q = DurableSinkQueue.open("s", cfg(tmp, 3, Duration.ZERO, 2))) {
+            for (int i = 1; i <= 10; i++) {
+                q.offer(rec(i));
+            }
+            assertThat(q.saturated()).isFalse();
+            assertThat(q.dropped()).isEqualTo(7);
+        }
+    }
+
+    @Test
+    void blockRecuperadoDoDiscoAcimaDoMaxDepthJaNasceSaturado(@TempDir Path tmp) throws Exception {
+        try (DurableSinkQueue q = DurableSinkQueue.open("s", blockCfg(tmp, 100, 10))) {
+            for (int i = 1; i <= 4; i++) {
+                q.offer(rec(i));
+            }
+        }
+        try (DurableSinkQueue reopened = DurableSinkQueue.open("s", blockCfg(tmp, 4, 10))) {
+            assertThat(reopened.depth()).isEqualTo(4);
+            assertThat(reopened.saturated()).isTrue();
+            assertThat(drainAll(reopened)).containsExactly(1, 2, 3, 4);
+            assertThat(reopened.saturated()).isFalse();
         }
     }
 }

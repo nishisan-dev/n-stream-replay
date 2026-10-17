@@ -14,6 +14,8 @@ public final class FakeSinkTarget implements SinkTarget {
     private final boolean requiresSync;
     public final List<ReplayRecord> received = Collections.synchronizedList(new java.util.ArrayList<>());
     public final AtomicInteger syncs = new AtomicInteger();
+    /** Simula um destino saturado (overflowPolicy=block) enquanto verdadeiro. */
+    public volatile boolean saturated;
 
     public FakeSinkTarget(String id, boolean requiresSync) {
         this.id = id;
@@ -29,6 +31,11 @@ public final class FakeSinkTarget implements SinkTarget {
     public boolean offer(ReplayRecord record) {
         received.add(record);
         return true;
+    }
+
+    @Override
+    public boolean saturated() {
+        return saturated;
     }
 
     @Override

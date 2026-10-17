@@ -329,4 +329,48 @@ class SourceConsumerTest {
         assertThat(preserved.received).extracting(ReplayRecord::key).allSatisfy(k -> assertThat(k).isEqualTo(controlKey));
         assertThat(keyed.received).extracting(ReplayRecord::destinationPartition).containsOnlyNulls();
     }
+
+    @Test
+    void backpressurePausaPartitionsDoDestinoSaturadoSemPerderNemParaOPoll() throws Exception {
+        TopicPartition p0 = new TopicPartition("t", 0);
+        TopicPartition p1 = new TopicPartition("t", 1);
+        TopicPartition other = new TopicPartition("other", 0);
+        MockConsumer<byte[], byte[]> mock = new MockConsumer<>(OffsetResetStrategy.EARLIEST);
+        mock.schedulePollTask(() -> {
+            mock.rebalance(List.of(p0, p1, other));
+            mock.updateBeginningOffsets(Map.of(p0, 0L, p1, 0L, other, 0L));
+        });
+        FakeSinkTarget slow = new FakeSinkTarget("slow", false);
+        FakeSinkTarget fast = new FakeSinkTarget("fast", false);
+        slow.saturated = true;   // destino cheio desde o início
+        RouteTable routes = RouteTable.build(List.of(
+                new RouteProperties("r1", "s1", "t", List.of(new RouteTarget("slow", null))),
+                new RouteProperties("r2", "s1", "other", List.of(new RouteTarget("fast", null)))),
+                Map.of("slow", slow, "fast", fast));
+        SourceConsumer consumer = new SourceConsumer(source("s1"), routes, NOOP, () -> mock);
+
+        Thread t = new Thread(consumer, "bp-source");
+        t.start();
+        try {
+            await().atMost(Duration.ofSeconds(5)).until(() -> mock.paused().size() == 2);
+            assertThat(mock.paused()).containsExactlyInAnyOrder(p0, p1);   // 'other' segue livre
+            mock.addRecord(kafkaRec("t", 0, 0L, "1"));
+            mock.addRecord(kafkaRec("t", 1, 0L, "2"));
+            mock.addRecord(kafkaRec("other", 0, 0L, "3"));
+            await().atMost(Duration.ofSeconds(5)).until(() -> fast.received.size() == 1);
+            // o tópico saturado não é consumido (o registro fica na origem), mas o poll segue vivo
+            assertThat(slow.received).isEmpty();
+            assertThat(consumer.pausedPartitions()).isEqualTo(2);
+            assertThat(consumer.backpressurePauses()).isEqualTo(1);
+
+            slow.saturated = false;   // destino drenou
+            await().atMost(Duration.ofSeconds(5)).until(() -> slow.received.size() == 2);
+            assertThat(mock.paused()).isEmpty();
+            assertThat(slow.received.stream().map(SourceConsumerTest::val)).containsExactlyInAnyOrder(1, 2);
+            assertThat(consumer.pausedPartitions()).isZero();
+        } finally {
+            consumer.stop();
+            t.join(5_000);
+        }
+    }
 }

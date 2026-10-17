@@ -2,6 +2,8 @@ package dev.nishisan.nstreamreplay.config;
 
 import dev.nishisan.nstreamreplay.decoder.Decoders;
 import dev.nishisan.nstreamreplay.route.PartitionKey;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
@@ -24,6 +26,8 @@ import java.util.function.Function;
 @Component
 public class ConfigValidator {
 
+    private static final Logger LOG = LoggerFactory.getLogger(ConfigValidator.class);
+
     public ConfigValidator(NStreamReplayProperties properties) {
         validate(properties);
     }
@@ -36,6 +40,10 @@ public class ConfigValidator {
     public static void validate(NStreamReplayProperties props) {
         Set<String> sourceIds = uniqueOrThrow(props.sources(), SourceProperties::id, "source");
         Set<String> sinkIds = uniqueOrThrow(props.sinks(), SinkProperties::id, "sink");
+
+        for (SinkProperties sink : props.sinks()) {
+            validateQueue(sink);
+        }
 
         Map<String, SourceProperties> sources = new HashMap<>();
         for (SourceProperties source : props.sources()) {
@@ -93,6 +101,28 @@ public class ConfigValidator {
                             "rota '" + route.id() + "' referencia sink inexistente: " + target.sink());
                 }
             }
+        }
+    }
+
+    /**
+     * Regras da fila durável de um destino. {@code overflowPolicy=block} promete não descartar
+     * nada; por isso não admite {@code retentionTime} (expiração por tempo descartaria backlog) e
+     * deve ser usado com {@code onWriteError=halt} (com {@code drop} uma falha de escrita local
+     * ainda descartaria o registro — apenas avisado, pois o operador pode aceitar esse risco).
+     */
+    private static void validateQueue(SinkProperties sink) {
+        QueueProperties queue = sink.queue();
+        if (queue == null || !queue.blocksOnOverflow()) {
+            return;
+        }
+        if (queue.hasRetentionTime()) {
+            throw new IllegalStateException("sink '" + sink.id() + "': overflowPolicy=block é incompatível com "
+                    + "retentionTime > 0 (a expiração por tempo descartaria registros). Use retentionTime: 0s");
+        }
+        if (queue.onWriteError() != OnWriteError.HALT) {
+            LOG.warn("sink '{}': overflowPolicy=block com onWriteError={} — uma falha de escrita local ainda "
+                    + "descarta o registro; use onWriteError=halt para não perder nada", sink.id(),
+                    queue.onWriteError());
         }
     }
 

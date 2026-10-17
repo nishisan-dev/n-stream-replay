@@ -185,4 +185,33 @@ class ConfigValidatorTest {
                 new RouteTarget("d", "cdc.mirror", null, Partitioning.KEY));
         assertThatThrownBy(() -> ConfigValidator.validate(props)).hasMessageContaining("conflitante");
     }
+
+    private static NStreamReplayProperties withQueue(QueueProperties queue) {
+        SinkProperties sink = new SinkProperties("d", "b:9092", "all", 50, "lz4", 1_048_576, Map.of(), queue);
+        return cfg(List.of(src("s1")), List.of(sink), List.of(route("r1", "s1", "t", "d")));
+    }
+
+    @Test
+    void rejeitaBlockComRetentionTime() {
+        QueueProperties queue = new QueueProperties("var/q", 100, Duration.ofHours(1), Durability.SYNC_ON_COMMIT,
+                OnWriteError.HALT, 256, 1000L, OverflowPolicy.BLOCK);
+        assertThatThrownBy(() -> ConfigValidator.validate(withQueue(queue)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("sink 'd'").hasMessageContaining("block")
+                .hasMessageContaining("retentionTime");
+    }
+
+    @Test
+    void aceitaBlockSemRetentionTimeEDropOldestComRetentionTime() {
+        assertThatCode(() -> ConfigValidator.validate(withQueue(new QueueProperties("var/q", 100, Duration.ZERO,
+                Durability.SYNC_ON_COMMIT, OnWriteError.HALT, 256, 1000L, OverflowPolicy.BLOCK))))
+                .doesNotThrowAnyException();
+        // block com onWriteError=drop é aceito (apenas avisado em log)
+        assertThatCode(() -> ConfigValidator.validate(withQueue(new QueueProperties("var/q", 100, Duration.ZERO,
+                Durability.SYNC_ON_COMMIT, OnWriteError.DROP, 256, 1000L, OverflowPolicy.BLOCK))))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> ConfigValidator.validate(withQueue(new QueueProperties("var/q", 100,
+                Duration.ofHours(1), Durability.SYNC_ON_COMMIT, OnWriteError.DROP, 256, 1000L))))
+                .doesNotThrowAnyException();
+    }
 }

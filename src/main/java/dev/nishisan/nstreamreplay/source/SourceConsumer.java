@@ -45,6 +45,15 @@ import java.util.function.Supplier;
  * gravando em cada destino um {@link ReplayRecord} com o {@code destinationTopic} resolvido
  * (explícito ou preservado). Alvos {@code (sink, destino)} idênticos no mesmo record são dedup.
  *
+ * <p><b>Backpressure ({@code overflowPolicy=block}):</b> antes de cada {@code poll}, as partições
+ * cujos tópicos alimentam algum destino {@link SinkTarget#saturated() saturado} recebem
+ * {@code pause()}; elas voltam com {@code resume()} quando o destino drena. O loop <b>continua
+ * chamando {@code poll}</b> (que não devolve registros das partições pausadas), então o consumer
+ * mantém heartbeat e {@code max.poll.interval.ms} em dia e o grupo não sofre rebalance, e nada é
+ * descartado: o que não foi lido continua no tópico de origem. Como o freio atua entre polls, a
+ * fila pode exceder {@code maxDepth} em até um lote ({@code maxPollRecords}) por origem. Um destino
+ * saturado freia todo tópico que roteia para ele, inclusive o fan-out para destinos saudáveis.
+ *
  * <p><b>sync-on-commit:</b> antes do {@code commitSync()}, força {@code sync()} nos destinos
  * tocados pelo lote que o exigem (group-commit).
  */
@@ -74,6 +83,8 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
     private final AtomicLong syncNanos = new AtomicLong();
     private final AtomicLong commitNanos = new AtomicLong();
     private final AtomicLong polledBatches = new AtomicLong();
+    private final AtomicLong backpressurePauses = new AtomicLong();
+    private final AtomicLong pausedPartitions = new AtomicLong();
     /** Sigma(endOffsets - position) das partições atribuídas; -1 = ainda não calculado/indisponível. */
     private final AtomicLong offsetLag = new AtomicLong(-1L);
     /** now - timestamp do record mais novo do último poll (ms); -1 = nenhum record ainda. */
@@ -134,6 +145,7 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
             LOG.info("[{}] consumo configurado: maxPollRecords={}, pollTimeoutMs={}",
                     props.id(), props.maxPollRecords(), props.pollTimeoutMs());
             while (running) {
+                applyBackpressure(c);
                 long pollStarted = System.nanoTime();
                 ConsumerRecords<byte[], byte[]> records;
                 try {
@@ -233,6 +245,48 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
         }
     }
 
+    /**
+     * Reconcilia {@code pause()}/{@code resume()} com a saturação dos destinos: pausa as partições
+     * atribuídas cujo tópico roteia para um destino saturado e retoma as pausadas que deixaram de
+     * ser. Roda na thread de poll (dona do consumer). Visível ao pacote para teste.
+     */
+    void applyBackpressure(Consumer<byte[], byte[]> c) {
+        Set<TopicPartition> paused = c.paused();
+        Set<String> blockedTopics = new HashSet<>();
+        for (String topic : routes.topicsFor(props.id())) {
+            for (RouteTable.Target target : routes.targetsFor(props.id(), topic)) {
+                if (target.sink().saturated()) {
+                    blockedTopics.add(topic);
+                    break;
+                }
+            }
+        }
+        if (blockedTopics.isEmpty() && paused.isEmpty()) {
+            return;   // caminho comum: ninguém saturado, nada pausado
+        }
+        java.util.List<TopicPartition> toPause = new java.util.ArrayList<>();
+        java.util.List<TopicPartition> toResume = new java.util.ArrayList<>();
+        for (TopicPartition tp : c.assignment()) {
+            boolean shouldPause = blockedTopics.contains(tp.topic());
+            boolean isPaused = paused.contains(tp);
+            if (shouldPause && !isPaused) {
+                toPause.add(tp);
+            } else if (!shouldPause && isPaused) {
+                toResume.add(tp);
+            }
+        }
+        if (!toPause.isEmpty()) {
+            c.pause(toPause);
+            backpressurePauses.incrementAndGet();
+            LOG.warn("[{}] destino saturado — origem freada (pause) em {}", props.id(), toPause);
+        }
+        if (!toResume.isEmpty()) {
+            c.resume(toResume);
+            LOG.info("[{}] destino drenou — origem retomada (resume) em {}", props.id(), toResume);
+        }
+        pausedPartitions.set(c.paused().size());
+    }
+
     private void commit(Consumer<byte[], byte[]> c) {
         long commitStarted = System.nanoTime();
         try {
@@ -297,6 +351,16 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
 
     public long consumedTotal() {
         return consumedTotal.get();
+    }
+
+    /** Quantas vezes a origem foi freada por destino saturado (pause) — backpressure do {@code block}. */
+    public long backpressurePauses() {
+        return backpressurePauses.get();
+    }
+
+    /** Partições atualmente pausadas por backpressure. */
+    public long pausedPartitions() {
+        return pausedPartitions.get();
     }
 
     public long offsetLag() {

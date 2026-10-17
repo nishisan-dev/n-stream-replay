@@ -172,4 +172,27 @@ class NStreamReplayPropertiesBindingTest {
         assertThat(to.get(0).partitioning()).isEqualTo(Partitioning.PRESERVE);
         assertThat(to.get(1).partitioning()).isEqualTo(Partitioning.KEY);
     }
+
+    @Test
+    void ligaOverflowPolicyComDefaultDropOldest() {
+        String yaml = """
+                nstreamreplay:
+                  sources:
+                    - { id: s1, bootstrapServers: "host:9092", groupId: "g" }
+                  sinks:
+                    - id: blocking
+                      bootstrapServers: "host:9092"
+                      queue: { maxDepth: 500, overflowPolicy: block, onWriteError: halt, retentionTime: 0s }
+                    - id: dropping
+                      bootstrapServers: "host:9092"
+                  routes:
+                    - { id: r1, source: s1, fromTopic: t, to: [ { sink: blocking } ] }
+                """;
+
+        NStreamReplayProperties props = bind(yaml);
+
+        assertThat(props.sinks().get(0).queue().overflowPolicy()).isEqualTo(OverflowPolicy.BLOCK);
+        assertThat(props.sinks().get(0).queue().blocksOnOverflow()).isTrue();
+        assertThat(props.sinks().get(1).queue().overflowPolicy()).isEqualTo(OverflowPolicy.DROP_OLDEST);
+    }
 }

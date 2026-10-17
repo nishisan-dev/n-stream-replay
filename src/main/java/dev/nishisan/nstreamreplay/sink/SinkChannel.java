@@ -81,6 +81,12 @@ public final class SinkChannel implements SinkTarget, Closeable {
         }
     }
 
+    /** Saturado sob {@code overflowPolicy=block}: a origem deve ser freada (ver {@link SinkTarget#saturated()}). */
+    @Override
+    public boolean saturated() {
+        return queue.saturated();
+    }
+
     /** A durabilidade exige {@code sync()} no boundary do commit da origem? (apenas SYNC_ON_COMMIT). */
     @Override
     public boolean requiresSyncBeforeCommit() {

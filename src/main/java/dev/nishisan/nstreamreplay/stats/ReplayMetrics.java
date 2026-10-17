@@ -58,6 +58,7 @@ public class ReplayMetrics {
     /** Empurra os indicadores correntes de um destino (chamado periodicamente pelo engine). */
     public void updateSink(SinkChannel ch) {
         gauge("sink", ch.id(), "depth", ch.depth());
+        gauge("sink", ch.id(), "saturated", ch.saturated() ? 1L : 0L);
         gauge("sink", ch.id(), "online", ch.online() ? 1L : 0L);
         gauge("sink", ch.id(), "published_total", ch.publishedTotal());
         gauge("sink", ch.id(), "dropped_total", ch.dropped());
@@ -90,6 +91,8 @@ public class ReplayMetrics {
         gauge("source", source.id(), "sync_nanos_total", timings.syncNanos());
         gauge("source", source.id(), "commit_nanos_total", timings.commitNanos());
         gauge("source", source.id(), "polled_batches_total", timings.polledBatches());
+        gauge("source", source.id(), "backpressure_pauses_total", source.backpressurePauses());
+        gauge("source", source.id(), "paused_partitions", source.pausedPartitions());
     }
 
     private void gauge(String dim, String id, String metric, long value) {

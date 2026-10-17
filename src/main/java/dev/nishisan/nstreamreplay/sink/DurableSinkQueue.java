@@ -33,6 +33,12 @@ import java.util.concurrent.locks.ReentrantLock;
  * o prefixo entregue com {@link #ack(int)}. Crash depois do move reencontra os itens na retry.
  * O TTL fica ativo apenas no backlog; itens já reservados nunca expiram nem sofrem drop-oldest.
  *
+ * <p><b>Overflow:</b> com {@code drop-oldest} (default) {@link #offer} descarta a cabeça do backlog ao
+ * atingir {@code maxDepth}. Com {@code block} nada é descartado: {@link #offer} sempre admite e a
+ * fila passa a reportar {@link #saturated()} ao atingir {@code maxDepth} (marca d'água alta), voltando
+ * ao normal quando a profundidade cai a {@code maxDepth/2} (marca d'água baixa, para não oscilar a
+ * cada ack). Quem freia a origem é o {@code SourceConsumer}, via {@code pause()}/{@code resume()}.
+ *
  * <p>Suporta producers concorrentes, mas assume <b>um</b> forwarder por instância; um segundo
  * forwarder quebraria a reserva FIFO entre {@link #peekBatch()} e {@link #ack(int)}.
  */
@@ -52,6 +58,9 @@ public final class DurableSinkQueue implements Closeable {
     private final int maxDepth;
     private final int batchSize;
     private final boolean retentionActive;
+    private final boolean blockOnFull;
+    /** Profundidade em que a fila saturada volta a aceitar mais carga da origem (histerese). */
+    private final long resumeDepth;
 
     private final ReentrantLock backlogLock = new ReentrantLock();
     private final ReentrantLock retryLock = new ReentrantLock();
@@ -60,17 +69,27 @@ public final class DurableSinkQueue implements Closeable {
     private final AtomicLong expired = new AtomicLong();
     private final AtomicLong offerLockWaitNanos = new AtomicLong();
     private final AtomicLong syncLockWaitNanos = new AtomicLong();
+    private final Object saturationLock = new Object();
+    private volatile boolean saturated = false;
     private volatile boolean closed = false;
 
     DurableSinkQueue(String sinkId, NQueue<ReplayRecord> backlog, NQueue<ReplayRecord> retry,
                      int maxDepth, int batchSize, boolean retentionActive) {
+        this(sinkId, backlog, retry, maxDepth, batchSize, retentionActive, false);
+    }
+
+    DurableSinkQueue(String sinkId, NQueue<ReplayRecord> backlog, NQueue<ReplayRecord> retry,
+                     int maxDepth, int batchSize, boolean retentionActive, boolean blockOnFull) {
         this.sinkId = sinkId;
         this.backlog = backlog;
         this.retry = retry;
         this.maxDepth = maxDepth;
         this.batchSize = batchSize;
         this.retentionActive = retentionActive;
+        this.blockOnFull = blockOnFull;
+        this.resumeDepth = maxDepth / 2;
         this.pending.set(backlog.size() + retry.size());
+        updateSaturation();   // backlog recuperado do disco já pode estar acima da marca d'água
     }
 
     /** Abre (ou recupera) as filas em disco em {@code basePath/<sinkId>/}. */
@@ -89,7 +108,7 @@ public final class DurableSinkQueue implements Closeable {
         NQueue<ReplayRecord> backlog = NQueue.open(baseDir, BACKLOG_NAME, backlogOpts);
         NQueue<ReplayRecord> retry = NQueue.open(baseDir, RETRY_NAME, retryOpts);
         DurableSinkQueue q = new DurableSinkQueue(sinkId, backlog, retry,
-                cfg.maxDepth(), cfg.batchSize(), cfg.hasRetentionTime());
+                cfg.maxDepth(), cfg.batchSize(), cfg.hasRetentionTime(), cfg.blocksOnOverflow());
         long depth = q.pending.get();
         if (depth > 0) {
             LOG.info("[{}] fila recuperou {} registro(s) pendente(s) do disco em {}", sinkId, depth, baseDir);
@@ -114,12 +133,15 @@ public final class DurableSinkQueue implements Closeable {
      * Retorna {@code false} apenas
      * no caso degenerado de backlog vazio com a fila cheia (tudo em voo na retry,
      * {@code maxDepth <= batchSize}), descartando o novo registro.
+     *
+     * <p>Sob {@code overflowPolicy=block} nunca descarta: sempre admite o registro (retorna
+     * {@code true}) e apenas marca a fila como {@link #saturated()} ao atingir {@code maxDepth}.
      */
     public boolean offer(ReplayRecord record) throws IOException {
         ensureOpen();
         lockMeasuringContention(backlogLock, offerLockWaitNanos);
         try {
-            if (pending.get() >= maxDepth) {
+            if (!blockOnFull && pending.get() >= maxDepth) {
                 Optional<ReplayRecord> evicted = backlog.poll(NONBLOCKING, TimeUnit.MILLISECONDS);
                 if (evicted.isPresent()) {
                     pending.decrementAndGet();
@@ -134,6 +156,7 @@ public final class DurableSinkQueue implements Closeable {
             }
             backlog.offer(record);
             pending.incrementAndGet();
+            updateSaturation();
             return true;
         } finally {
             backlogLock.unlock();
@@ -218,6 +241,7 @@ public final class DurableSinkQueue implements Closeable {
                     break;
                 }
             }
+            updateSaturation();
         } finally {
             retryLock.unlock();
         }
@@ -241,6 +265,7 @@ public final class DurableSinkQueue implements Closeable {
                 }
                 long truth = backlog.size() + retry.size();
                 pending.set(truth);
+                updateSaturation();
                 return truth;
             } finally {
                 backlogLock.unlock();
@@ -272,6 +297,35 @@ public final class DurableSinkQueue implements Closeable {
     /** Profundidade pendente (backlog + retry) — observabilidade. */
     public long depth() {
         return pending.get();
+    }
+
+    /**
+     * A fila (em modo {@code block}) atingiu {@code maxDepth} e ainda não drenou até a marca d'água
+     * baixa? Enquanto verdadeiro a origem deve ser freada. Sempre {@code false} em {@code drop-oldest}.
+     */
+    public boolean saturated() {
+        return saturated;
+    }
+
+    /**
+     * Recalcula a saturação a partir da profundidade atual (sempre converge para o valor corrente,
+     * mesmo com offer e ack concorrentes): liga em {@code >= maxDepth}, desliga em
+     * {@code <= maxDepth/2}, e mantém o estado entre as duas marcas (histerese).
+     */
+    private void updateSaturation() {
+        if (!blockOnFull) {
+            return;
+        }
+        synchronized (saturationLock) {
+            long depth = pending.get();
+            if (!saturated && depth >= maxDepth) {
+                saturated = true;
+                LOG.warn("[{}] fila saturada em {} (overflowPolicy=block) — a origem será freada", sinkId, depth);
+            } else if (saturated && depth <= resumeDepth) {
+                saturated = false;
+                LOG.info("[{}] fila drenou até {} — a origem pode retomar", sinkId, depth);
+            }
+        }
     }
 
     /** Total descartado por DROP-oldest de contagem — perda silenciosa, deve ser alertado. */

@@ -50,4 +50,19 @@ class StatsReporterTest {
         assertThat(StatsReporter.formatRouting(java.util.List.of(source)))
                 .contains("orders decodeErrors=2 decodeDropped=4 keyMissingDropped=3 keyTypeDropped=1");
     }
+
+    @Test
+    void backpressureMostraSaturacaoDoDestinoEPausasDaOrigem() {
+        var source = org.mockito.Mockito.mock(dev.nishisan.nstreamreplay.source.SourceConsumer.class);
+        org.mockito.Mockito.when(source.id()).thenReturn("cdc-src");
+        org.mockito.Mockito.when(source.pausedPartitions()).thenReturn(4L);
+        org.mockito.Mockito.when(source.backpressurePauses()).thenReturn(2L);
+        var sink = org.mockito.Mockito.mock(dev.nishisan.nstreamreplay.sink.SinkChannel.class);
+        org.mockito.Mockito.when(sink.id()).thenReturn("dev");
+        org.mockito.Mockito.when(sink.saturated()).thenReturn(true);
+
+        assertThat(StatsReporter.formatBackpressure(java.util.List.of(source), java.util.List.of(sink)))
+                .contains("sink dev saturated=true")
+                .contains("source cdc-src pausedPartitions=4 pauses=2");
+    }
 }

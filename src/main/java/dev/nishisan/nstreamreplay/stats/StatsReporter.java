@@ -83,8 +83,9 @@ public final class StatsReporter {
                     currentLocks, previousLocks));
         }
 
-        STATS.info("stats (janela {} ms)\n{}{}{}", elapsedMs, format(sourceLines, sinkLines),
-                formatRouting(sources), formatTimings(sourceTimingLines, sinkTimingLines));
+        STATS.info("stats (janela {} ms)\n{}{}{}{}", elapsedMs, format(sourceLines, sinkLines),
+                formatRouting(sources), formatBackpressure(sources, sinks),
+                formatTimings(sourceTimingLines, sinkTimingLines));
     }
 
     static String formatRouting(List<SourceConsumer> sources) {
@@ -95,6 +96,22 @@ public final class StatsReporter {
                     "  %s decodeErrors=%d decodeDropped=%d keyMissingDropped=%d keyTypeDropped=%d%n",
                     source.id(), routing.decodeErrors(), routing.decodeDropped(),
                     routing.keyMissingDropped(), routing.keyTypeDropped()));
+        }
+        return out.toString();
+    }
+
+    /**
+     * Backpressure do {@code overflowPolicy=block}: por destino se está saturado e, por origem,
+     * quantas partições estão pausadas agora e quantas vezes houve pause.
+     */
+    static String formatBackpressure(List<SourceConsumer> sources, List<SinkChannel> sinks) {
+        StringBuilder out = new StringBuilder("BACKPRESSURE:\n");
+        for (SinkChannel sink : sinks) {
+            out.append(String.format(Locale.ROOT, "  sink %s saturated=%s%n", sink.id(), sink.saturated()));
+        }
+        for (SourceConsumer source : sources) {
+            out.append(String.format(Locale.ROOT, "  source %s pausedPartitions=%d pauses=%d%n",
+                    source.id(), source.pausedPartitions(), source.backpressurePauses()));
         }
         return out.toString();
     }

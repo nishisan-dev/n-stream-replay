@@ -10,11 +10,18 @@
 #                              destino (key em bytes crus e headers intactos).
 #  - Pré-requisito: o tópico de destino já existe, com pelo menos 4 partições (a aplicação
 #    NÃO cria tópicos e não sobe se a checagem falhar).
-#  - Sink dedicado ao espelho: overflowPolicy=block + onWriteError=halt + retentionTime=0s +
-#    durability=sync-on-commit ⇒ nada é descartado; fila cheia ou destino fora freiam a
-#    origem (pause nas partições) em vez de perder registros.
-#  - O espelho é at-least-once: pode haver duplicatas, nunca perda (o consumidor deve ser
-#    idempotente).
+#  - Sink dedicado ao espelho: overflowPolicy=block + onWriteError=halt + onPoison=halt +
+#    retentionTime=0s + durability=sync-on-commit. A fila nunca descarta por contagem ou tempo:
+#    fila cheia ou destino fora freiam a origem (pause nas partições). Um registro que o Kafka
+#    rejeita em definitivo (RecordTooLarge, TopicAuthorization, OutOfOrderSequence, oversize...)
+#    PARA o forwarder deste sink (ERROR em log, métrica sink.halted) e fica na cabeça da fila;
+#    corrija o destino e REINICIE o processo para reenviá-lo. Com onPoison=drop ele seria
+#    descartado depois do commit da origem (por isso block exige onPoison=halt).
+#  - O espelho é at-least-once: pode haver duplicatas; o que a configuração acima cobre é a
+#    perda por fila cheia/tempo, falha de escrita local e rejeição permanente do Kafka. Não
+#    cobre: perda por apagamento do disco da fila, nem headers com chave repetida (o relay
+#    guarda um valor por chave de header). Use basePath ABSOLUTO em volume persistente.
+#  - O consumidor do destino deve ser idempotente.
 # ════════════════════════════════════════════════════════════════════════════
 nstreamreplay:
   sources:
@@ -32,11 +39,12 @@ nstreamreplay:
       lingerMs: 5
       compressionType: lz4
       queue:
-        basePath: "var/n-stream-replay/queues"
+        basePath: "/var/lib/n-stream-replay/queues"   # absoluto, em volume persistente
         maxDepth: 200000                   # marca d'água: ao atingir, a origem é freada (pode exceder em até 1 lote)
         overflowPolicy: block              # nunca descarta (default: drop-oldest)
         retentionTime: 0s                  # obrigatório com block (expiração por tempo descartaria)
         onWriteError: halt                 # falha de escrita local para a origem sem commitar
+        onPoison: halt                     # registro rejeitado em definitivo pelo Kafka PARA este destino (não descarta)
         durability: sync-on-commit
         batchSize: 256
         forwarderRetryBackoffMs: 1000

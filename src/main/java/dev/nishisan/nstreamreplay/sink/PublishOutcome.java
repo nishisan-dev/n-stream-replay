@@ -13,14 +13,27 @@ package dev.nishisan.nstreamreplay.sink;
  *       que um único item venenoso não trave o FIFO (head-of-line block).</li>
  * </ul>
  *
+ * <p>{@code haltReason}: preenchido apenas sob {@code onPoison=halt} quando o próximo registro (logo
+ * após o prefixo confirmável) foi rejeitado em definitivo. Esse registro <b>não</b> entra em
+ * {@code poisoned} nem é confirmado; o forwarder confirma só o prefixo entregue e para de entregar.
+ *
  * <p>Invariante: {@code acked() == published + poisoned} (ambos cobrem o prefixo contíguo).
  */
-public record PublishOutcome(int published, int poisoned) {
+public record PublishOutcome(int published, int poisoned, String haltReason) {
 
     public PublishOutcome {
         if (published < 0 || poisoned < 0) {
             throw new IllegalArgumentException("published/poisoned devem ser >= 0");
         }
+    }
+
+    public PublishOutcome(int published, int poisoned) {
+        this(published, poisoned, null);
+    }
+
+    /** O sink pede ao forwarder que pare (onPoison=halt)? */
+    public boolean halted() {
+        return haltReason != null;
     }
 
     /** Nada entregue nem descartado (ex.: broker indisponível no primeiro item). */

@@ -187,4 +187,90 @@ class SinkForwarderTest {
             assertThat(sink.delivered).isEmpty();
         }
     }
+
+    private static List<RuntimeException> permanentErrors() {
+        return List.of(
+                new org.apache.kafka.common.errors.OutOfOrderSequenceException("sequência fora de ordem"),
+                new org.apache.kafka.common.errors.TopicAuthorizationException("sem permissão de Write"),
+                new org.apache.kafka.common.errors.RecordTooLargeException("registro maior que max.message.bytes"));
+    }
+
+    @Test
+    void onPoisonHaltParaOForwarderSemConfirmarORegistro(@TempDir Path tmp) throws Exception {
+        for (RuntimeException error : permanentErrors()) {
+            Path dir = tmp.resolve(error.getClass().getSimpleName());
+            try (DurableSinkQueue q = DurableSinkQueue.open("s", cfg(dir, 100))) {
+                for (int i = 1; i <= 6; i++) {
+                    q.offer(rec(i));
+                }
+                KafkaSinkTest.ScriptedProducer producer = new KafkaSinkTest.ScriptedProducer();
+                producer.scriptSuccess();
+                producer.scriptSuccess();
+                producer.scriptError(error);   // 3º registro (offset 3) é rejeitado em definitivo
+                KafkaSink sink = new KafkaSink(producer, 0, dev.nishisan.nstreamreplay.config.OnPoison.HALT);
+                SinkForwarder fwd = new SinkForwarder("s", q, sink, 0L);
+
+                assertThat(fwd.forwardOnce()).isTrue();
+
+                // só o prefixo entregue (2) foi confirmado; o inválido e o resto continuam na fila
+                assertThat(q.depth()).as(error.getClass().getSimpleName()).isEqualTo(4);
+                assertThat(fwd.publishedTotal()).isEqualTo(2);
+                assertThat(fwd.poisonedTotal()).isZero();
+                assertThat(fwd.halted()).isTrue();
+                assertThat(fwd.haltedReason()).contains(error.getClass().getSimpleName())
+                        .contains("origem=t:0@3").contains("destino=t");
+                int sentAfterHalt = producer.sent.size();
+                assertThat(sentAfterHalt).isEqualTo(3);   // nada além do registro inválido foi enviado
+
+                // parado: não envia mais nada, a profundidade não muda
+                assertThat(fwd.forwardOnce()).isFalse();
+                assertThat(producer.sent).hasSize(sentAfterHalt);
+                assertThat(q.depth()).isEqualTo(4);
+
+                // a cabeça da fila segue sendo o registro rejeitado (será reenviado após reiniciar)
+                assertThat(q.peekBatch().get(0).offset()).isEqualTo(3L);
+            }
+        }
+    }
+
+    @Test
+    void onPoisonHaltTambemParaNoOversizeLocal(@TempDir Path tmp) throws Exception {
+        try (DurableSinkQueue q = DurableSinkQueue.open("s", cfg(tmp, 100))) {
+            q.offer(rec(1));
+            q.offer(new ReplayRecord("t", 0, 2, 2, null, new byte[100], Map.of(), "t"));
+            q.offer(rec(3));
+            KafkaSinkTest.ScriptedProducer producer = new KafkaSinkTest.ScriptedProducer();
+            KafkaSink sink = new KafkaSink(producer, 10, dev.nishisan.nstreamreplay.config.OnPoison.HALT);
+            SinkForwarder fwd = new SinkForwarder("s", q, sink, 0L);
+
+            fwd.forwardOnce();
+
+            assertThat(fwd.halted()).isTrue();
+            assertThat(fwd.haltedReason()).contains("acima do limite").contains("origem=t:0@2");
+            assertThat(q.depth()).isEqualTo(2);
+            assertThat(producer.sent).hasSize(1);   // só o 1º foi enviado
+            assertThat(fwd.poisonedTotal()).isZero();
+        }
+    }
+
+    @Test
+    void onPoisonDropContinuaDescartandoOsMesmosErros(@TempDir Path tmp) throws Exception {
+        for (RuntimeException error : permanentErrors()) {
+            try (DurableSinkQueue q = DurableSinkQueue.open("s", cfg(tmp.resolve(error.getClass().getSimpleName()), 100))) {
+                for (int i = 1; i <= 3; i++) {
+                    q.offer(rec(i));
+                }
+                KafkaSinkTest.ScriptedProducer producer = new KafkaSinkTest.ScriptedProducer();
+                producer.scriptSuccess();
+                producer.scriptError(error);
+                SinkForwarder fwd = new SinkForwarder("s", q, new KafkaSink(producer, 0), 0L);
+
+                fwd.forwardOnce();
+
+                assertThat(fwd.halted()).isFalse();
+                assertThat(fwd.poisonedTotal()).isEqualTo(1);   // comportamento padrão (drop)
+                assertThat(q.depth()).isZero();
+            }
+        }
+    }
 }

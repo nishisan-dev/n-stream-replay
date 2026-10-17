@@ -24,9 +24,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 class KafkaSinkTest {
 
     /** Producer simulado com saídas roteirizadas (sucesso/erro) por chamada de send, em ordem. */
-    static final class ScriptedProducer extends MockProducer<byte[], byte[]> {
+    static class ScriptedProducer extends MockProducer<byte[], byte[]> {
         private final Deque<CompletableFuture<RecordMetadata>> outcomes = new ArrayDeque<>();
-        private final List<ProducerRecord<byte[], byte[]>> sent = new ArrayList<>();
+        final List<ProducerRecord<byte[], byte[]>> sent = new ArrayList<>();
 
         void scriptSuccess() {
             outcomes.add(CompletableFuture.completedFuture(null));
@@ -203,5 +203,54 @@ class KafkaSinkTest {
         assertThat(p.get("max.in.flight.requests.per.connection")).isEqualTo("3");
         var q = KafkaSink.producerProperties(sinkProps("1", Map.of("enable.idempotence", "true", "acks", "all")));
         assertThat(q).doesNotContainKey("max.in.flight.requests.per.connection");
+    }
+
+    @Test
+    void onPoisonHaltDevolvePrefixoEntregueEMotivoSemContarVeneno() {
+        ScriptedProducer producer = new ScriptedProducer();
+        producer.scriptSuccess();
+        producer.scriptError(new RecordTooLargeException("grande demais"));
+        producer.scriptSuccess();
+        try (KafkaSink sink = new KafkaSink(producer, 0, dev.nishisan.nstreamreplay.config.OnPoison.HALT)) {
+            PublishOutcome outcome = sink.publish(List.of(rec(1), rec(1), rec(1)));
+            assertThat(outcome.published()).isEqualTo(1);
+            assertThat(outcome.poisoned()).isZero();
+            assertThat(outcome.acked()).isEqualTo(1);
+            assertThat(outcome.halted()).isTrue();
+            assertThat(outcome.haltReason()).contains("RecordTooLargeException").contains("origem=src:0@1");
+        }
+        assertThat(producer.sent).hasSize(2);   // o 3º não foi enviado
+    }
+
+    @Test
+    void estouroDePilhaDaCadeiaDeFuturesNaoMataOForwarderENadaECondenado() {
+        ScriptedProducer producer = new ScriptedProducer() {
+            private int calls;
+
+            @Override
+            public Future<RecordMetadata> send(ProducerRecord<byte[], byte[]> record) {
+                super.send(record);
+                if (++calls == 2) {
+                    return new CompletableFuture<>() {
+                        @Override
+                        public RecordMetadata get() {
+                            throw new StackOverflowError();
+                        }
+
+                        @Override
+                        public boolean isDone() {
+                            return false;
+                        }
+                    };
+                }
+                return CompletableFuture.completedFuture(null);
+            }
+        };
+        try (KafkaSink sink = new KafkaSink(producer, 0, dev.nishisan.nstreamreplay.config.OnPoison.HALT)) {
+            PublishOutcome outcome = sink.publish(List.of(rec(1), rec(1), rec(1)));
+            assertThat(outcome.published()).isEqualTo(1);   // só o prefixo anterior à cadeia quebrada
+            assertThat(outcome.poisoned()).isZero();
+            assertThat(outcome.halted()).isFalse();
+        }
     }
 }

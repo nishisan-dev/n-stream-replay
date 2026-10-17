@@ -16,6 +16,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * confirmados permanecem na fila (disco) e o forwarder faz backoff antes de retentar o mesmo
  * lote — sem perda até o teto da fila. Um único forwarder FIFO por destino preserva a ordem.
  *
+ * <p><b>Parada por veneno ({@code onPoison=halt}):</b> se o {@link Sink} devolve um
+ * {@link PublishOutcome#haltReason() motivo de parada}, o forwarder confirma só o prefixo entregue,
+ * <b>não confirma</b> o registro rejeitado (fica na cabeça da retry), loga ERROR e passa a não
+ * entregar mais nada deste destino ({@link #halted()}). Os demais destinos e as origens seguem; a
+ * fila cresce até saturar. O estado só é limpo reiniciando o processo.
+ *
  * <p>Faz periodicamente {@code sweepAndReconcile} (expira por tempo o backlog e reconcilia a
  * profundidade), inclusive enquanto o destino está offline — quando o draining não ocorre.
  */
@@ -39,6 +45,7 @@ public final class SinkForwarder implements Runnable {
     /** Otimista: começa online; só vira offline quando uma publicação com itens falha. */
     private volatile boolean online = true;
     private volatile boolean running = true;
+    private volatile String haltedReason;
 
     private long lastSweepNanos = System.nanoTime() - msToNanos(SWEEP_INTERVAL_MS);
 
@@ -82,6 +89,9 @@ public final class SinkForwarder implements Runnable {
      * subir a thread. Retorna {@code true} se havia itens.
      */
     boolean forwardOnce() throws Exception {
+        if (haltedReason != null) {
+            return false;   // parado por veneno: não entrega nem toca na fila (o sweep segue)
+        }
         long peekStarted = System.nanoTime();
         List<ReplayRecord> items;
         try {
@@ -115,8 +125,14 @@ public final class SinkForwarder implements Runnable {
         if (outcome.poisoned() > 0) {
             poisonedTotal.addAndGet(outcome.poisoned());
         }
+        if (outcome.halted()) {
+            haltedReason = outcome.haltReason();
+            LOG.error("[{}] forwarder PARADO por registro rejeitado em definitivo (onPoison=halt): {}. "
+                            + "Nada mais será entregue a este destino até corrigir o destino e reiniciar o processo; "
+                            + "profundidade da fila={}", sinkId, haltedReason, queue.depth());
+        }
         online = acked > 0;   // entregou/descartou algo => broker alcançável; none() => offline
-        if (acked < items.size() && running) {
+        if (acked < items.size() && running && !outcome.halted()) {
             retryBackoffs.incrementAndGet();
             sleep(retryBackoffMs);
         }
@@ -141,6 +157,16 @@ public final class SinkForwarder implements Runnable {
 
     public long retryBackoffs() {
         return retryBackoffs.get();
+    }
+
+    /** Parado por registro rejeitado em definitivo ({@code onPoison=halt})? */
+    public boolean halted() {
+        return haltedReason != null;
+    }
+
+    /** Motivo da parada (destino, origem tópico:partição@offset e erro); {@code null} se não parado. */
+    public String haltedReason() {
+        return haltedReason;
     }
 
     public boolean online() {

@@ -194,7 +194,7 @@ class ConfigValidatorTest {
     @Test
     void rejeitaBlockComRetentionTime() {
         QueueProperties queue = new QueueProperties("var/q", 100, Duration.ofHours(1), Durability.SYNC_ON_COMMIT,
-                OnWriteError.HALT, 256, 1000L, OverflowPolicy.BLOCK);
+                OnWriteError.HALT, 256, 1000L, OverflowPolicy.BLOCK, OnPoison.HALT);
         assertThatThrownBy(() -> ConfigValidator.validate(withQueue(queue)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("sink 'd'").hasMessageContaining("block")
@@ -202,16 +202,30 @@ class ConfigValidatorTest {
     }
 
     @Test
-    void aceitaBlockSemRetentionTimeEDropOldestComRetentionTime() {
+    void aceitaBlockComHaltEDropOldestComRetentionTime() {
         assertThatCode(() -> ConfigValidator.validate(withQueue(new QueueProperties("var/q", 100, Duration.ZERO,
-                Durability.SYNC_ON_COMMIT, OnWriteError.HALT, 256, 1000L, OverflowPolicy.BLOCK))))
-                .doesNotThrowAnyException();
-        // block com onWriteError=drop é aceito (apenas avisado em log)
-        assertThatCode(() -> ConfigValidator.validate(withQueue(new QueueProperties("var/q", 100, Duration.ZERO,
-                Durability.SYNC_ON_COMMIT, OnWriteError.DROP, 256, 1000L, OverflowPolicy.BLOCK))))
+                Durability.SYNC_ON_COMMIT, OnWriteError.HALT, 256, 1000L, OverflowPolicy.BLOCK, OnPoison.HALT))))
                 .doesNotThrowAnyException();
         assertThatCode(() -> ConfigValidator.validate(withQueue(new QueueProperties("var/q", 100,
                 Duration.ofHours(1), Durability.SYNC_ON_COMMIT, OnWriteError.DROP, 256, 1000L))))
                 .doesNotThrowAnyException();
+    }
+
+    @Test
+    void rejeitaBlockSemOnWriteErrorHalt() {
+        QueueProperties queue = new QueueProperties("var/q", 100, Duration.ZERO, Durability.SYNC_ON_COMMIT,
+                OnWriteError.DROP, 256, 1000L, OverflowPolicy.BLOCK, OnPoison.HALT);
+        assertThatThrownBy(() -> ConfigValidator.validate(withQueue(queue)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("sink 'd'").hasMessageContaining("onWriteError: halt");
+    }
+
+    @Test
+    void rejeitaBlockComOnPoisonDrop() {
+        QueueProperties queue = new QueueProperties("var/q", 100, Duration.ZERO, Durability.SYNC_ON_COMMIT,
+                OnWriteError.HALT, 256, 1000L, OverflowPolicy.BLOCK, OnPoison.DROP);
+        assertThatThrownBy(() -> ConfigValidator.validate(withQueue(queue)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("sink 'd'").hasMessageContaining("onPoison: halt");
     }
 }

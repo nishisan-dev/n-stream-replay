@@ -1,5 +1,6 @@
 package dev.nishisan.nstreamreplay.sink;
 
+import dev.nishisan.nstreamreplay.config.OnPoison;
 import dev.nishisan.nstreamreplay.config.SinkProperties;
 import dev.nishisan.nstreamreplay.model.ReplayRecord;
 import org.apache.kafka.clients.producer.KafkaProducer;
@@ -39,6 +40,11 @@ import java.util.concurrent.Future;
  * acima do limite e (2) classifica erros <b>não-retryable</b> ({@code ApiException} que não é
  * {@link RetriableException}) como descarte — contabilizados como {@code poisoned} e jamais
  * retentados. Erros transitórios param o prefixo e mantêm o restante na fila.
+ *
+ * <p>Esse descarte é perda definitiva (o offset da origem já foi commitado). Com
+ * {@code onPoison=halt} o sink <b>não descarta</b>: devolve o prefixo entregue com um
+ * {@link PublishOutcome#haltReason() motivo de parada} e o registro rejeitado fica na fila; o
+ * forwarder para de entregar aquele destino.
  */
 public final class KafkaSink implements Sink {
 
@@ -52,15 +58,23 @@ public final class KafkaSink implements Sink {
 
     private final Producer<byte[], byte[]> producer;
     private final int maxPayloadBytes;
+    private final OnPoison onPoison;
 
     public KafkaSink(SinkProperties settings) {
-        this(buildProducer(settings), settings.maxRequestSize() - RECORD_OVERHEAD_BYTES);
+        this(buildProducer(settings), settings.maxRequestSize() - RECORD_OVERHEAD_BYTES,
+                settings.queue().onPoison());
     }
 
-    /** Visível para teste (injeção de producer simulado + teto da guarda). */
+    /** Visível para teste (injeção de producer simulado + teto da guarda); descarta venenos. */
     KafkaSink(Producer<byte[], byte[]> producer, int maxPayloadBytes) {
+        this(producer, maxPayloadBytes, OnPoison.DROP);
+    }
+
+    /** Visível para teste (injeção de producer simulado + teto da guarda + política de veneno). */
+    KafkaSink(Producer<byte[], byte[]> producer, int maxPayloadBytes, OnPoison onPoison) {
         this.producer = producer;
         this.maxPayloadBytes = maxPayloadBytes;
+        this.onPoison = onPoison;
     }
 
     private static Producer<byte[], byte[]> buildProducer(SinkProperties s) {
@@ -104,10 +118,17 @@ public final class KafkaSink implements Sink {
     @Override
     public PublishOutcome publish(List<ReplayRecord> batch) {
         int n = batch.size();
+        boolean halt = onPoison == OnPoison.HALT;
         List<Future<RecordMetadata>> futures = new ArrayList<>(n);
+        String oversizeHalt = null;   // motivo, se um oversize local parou o envio (onPoison=halt)
         // Fase de envio: a guarda pré-send marca os oversize (future null = não enviado).
         for (ReplayRecord rec : batch) {
             if (isOversize(rec)) {
+                if (halt) {
+                    oversizeHalt = haltReason(rec, "payload de " + rec.valueSize() + " B acima do limite de "
+                            + maxPayloadBytes + " B (maxRequestSize)");
+                    break;   // não envia nada além do registro inválido
+                }
                 LOG.warn("Registro oversize ({} B > limite {} B) descartado para não travar o stream "
                                 + "(tópico={}, origem={}:{}@{})",
                         rec.valueSize(), maxPayloadBytes, rec.destinationTopic(),
@@ -116,10 +137,11 @@ public final class KafkaSink implements Sink {
             } else {
                 Future<RecordMetadata> sent = producer.send(toProducerRecord(rec));
                 futures.add(sent);
-                if (failedTransientlyAlready(sent)) {
-                    // O envio já falhou de forma transitória (ex.: partição/tópico ausente após
-                    // max.block.ms). Enviar o resto do lote só gastaria max.block.ms por item e
-                    // entregaria registros além do ponto de falha, que serão reenviados em ordem.
+                Throwable immediate = immediateFailure(sent);
+                if (immediate != null && (!isNonRetryable(immediate) || halt)) {
+                    // O envio já falhou (transitório, ex.: partição/tópico ausente após max.block.ms;
+                    // ou permanente sob halt). Enviar o resto do lote só gastaria max.block.ms por item
+                    // e entregaria registros além do ponto de falha, que serão reenviados em ordem.
                     break;
                 }
             }
@@ -129,7 +151,7 @@ public final class KafkaSink implements Sink {
         int poisoned = 0;
         // Avaliação em ordem: prefixo contíguo de entregues + venenos; o primeiro erro
         // transitório encerra o prefixo (restante fica na fila). futures.size() < n quando o
-        // envio foi interrompido por uma falha transitória imediata.
+        // envio foi interrompido por uma falha imediata ou por oversize sob halt.
         for (int i = 0; i < futures.size(); i++) {
             Future<RecordMetadata> f = futures.get(i);
             if (f == null) {
@@ -141,36 +163,62 @@ public final class KafkaSink implements Sink {
                 published++;
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
-                break;
+                return new PublishOutcome(published, poisoned);
+            } catch (StackOverflowError so) {
+                // Bug conhecido do cliente: se o limite do tópico (max.message.bytes) for menor que o
+                // batch.size do producer, o batch rejeitado é "dividido" em batches idênticos, em laço, e a
+                // cadeia de futures estoura a pilha. Não deixa a thread do forwarder morrer: trata como
+                // falha transitória (nada é confirmado nem descartado; o batch expira pelo delivery.timeout).
+                LOG.error("Cadeia de futures do producer estourou a pilha (limite max.message.bytes do tópico de "
+                        + "destino menor que o batch.size do producer?) — {} item(ns) ficam na fila",
+                        n - published - poisoned);
+                return new PublishOutcome(published, poisoned);
             } catch (ExecutionException ee) {
                 Throwable cause = ee.getCause();
                 if (isNonRetryable(cause)) {
+                    ReplayRecord rec = batch.get(i);
+                    if (halt) {
+                        String reason = haltReason(rec, cause.getClass().getSimpleName() + ": " + cause.getMessage());
+                        LOG.error("Kafka rejeitou registro em definitivo — destino PARADO, registro mantido na fila: {}",
+                                reason, cause);
+                        return new PublishOutcome(published, poisoned, reason);
+                    }
                     LOG.warn("Kafka rejeitou registro em definitivo ({}) — descartado (tópico={}, origem={}:{}@{})",
-                            cause.getClass().getSimpleName(), batch.get(i).destinationTopic(),
-                            batch.get(i).sourceTopic(), batch.get(i).partition(), batch.get(i).offset());
+                            cause.getClass().getSimpleName(), rec.destinationTopic(),
+                            rec.sourceTopic(), rec.partition(), rec.offset());
                     poisoned++;
                     continue;
                 }
                 LOG.warn("Falha entregando ao Kafka — {} item(ns) ficam na fila", n - published - poisoned, cause);
-                break;
+                return new PublishOutcome(published, poisoned);
             }
+        }
+        if (oversizeHalt != null && futures.size() == published + poisoned) {
+            LOG.error("Registro oversize — destino PARADO, registro mantido na fila: {}", oversizeHalt);
+            return new PublishOutcome(published, poisoned, oversizeHalt);
         }
         return new PublishOutcome(published, poisoned);
     }
 
-    /** O future já terminou com erro que não é permanente (portanto o registro deve ser retentado)? */
-    private static boolean failedTransientlyAlready(Future<RecordMetadata> future) {
+    private static String haltReason(ReplayRecord rec, String detail) {
+        return detail + " (destino=" + rec.destinationTopic()
+                + (rec.destinationPartition() == null ? "" : "/" + rec.destinationPartition())
+                + ", origem=" + rec.sourceTopic() + ":" + rec.partition() + "@" + rec.offset() + ")";
+    }
+
+    /** A causa, se o future já terminou com erro; {@code null} se pendente ou bem-sucedido. */
+    private static Throwable immediateFailure(Future<RecordMetadata> future) {
         if (!future.isDone()) {
-            return false;
+            return null;
         }
         try {
             future.get();
-            return false;
+            return null;
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
-            return false;
+            return null;
         } catch (ExecutionException ee) {
-            return !isNonRetryable(ee.getCause());
+            return ee.getCause();
         }
     }
 

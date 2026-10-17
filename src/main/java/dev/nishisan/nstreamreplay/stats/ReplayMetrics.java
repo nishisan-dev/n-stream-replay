@@ -60,6 +60,7 @@ public class ReplayMetrics {
         gauge("sink", ch.id(), "depth", ch.depth());
         gauge("sink", ch.id(), "saturated", ch.saturated() ? 1L : 0L);
         gauge("sink", ch.id(), "online", ch.online() ? 1L : 0L);
+        gauge("sink", ch.id(), "halted", ch.halted() ? 1L : 0L);
         gauge("sink", ch.id(), "published_total", ch.publishedTotal());
         gauge("sink", ch.id(), "dropped_total", ch.dropped());
         gauge("sink", ch.id(), "expired_total", ch.expired());

@@ -107,7 +107,8 @@ public final class StatsReporter {
     static String formatBackpressure(List<SourceConsumer> sources, List<SinkChannel> sinks) {
         StringBuilder out = new StringBuilder("BACKPRESSURE:\n");
         for (SinkChannel sink : sinks) {
-            out.append(String.format(Locale.ROOT, "  sink %s saturated=%s%n", sink.id(), sink.saturated()));
+            out.append(String.format(Locale.ROOT, "  sink %s saturated=%s halted=%s%n", sink.id(), sink.saturated(),
+                    sink.halted() ? "YES (" + sink.haltedReason() + ")" : "no"));
         }
         for (SourceConsumer source : sources) {
             out.append(String.format(Locale.ROOT, "  source %s pausedPartitions=%d pauses=%d%n",

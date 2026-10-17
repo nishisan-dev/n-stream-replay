@@ -2,6 +2,7 @@ package dev.nishisan.nstreamreplay.it;
 
 import dev.nishisan.nstreamreplay.config.Durability;
 import dev.nishisan.nstreamreplay.config.NStreamReplayProperties;
+import dev.nishisan.nstreamreplay.config.OnPoison;
 import dev.nishisan.nstreamreplay.config.OnWriteError;
 import dev.nishisan.nstreamreplay.config.OverflowPolicy;
 import dev.nishisan.nstreamreplay.config.Partitioning;
@@ -176,9 +177,15 @@ class PartitionPreserveIT {
 
     private SinkChannel openSink(String id, String bootstrap, Path base, int maxDepth, int batchSize,
                                  OverflowPolicy policy) throws Exception {
+        return openSink(id, bootstrap, base, maxDepth, batchSize, policy, Map.of());
+    }
+
+    private SinkChannel openSink(String id, String bootstrap, Path base, int maxDepth, int batchSize,
+                                 OverflowPolicy policy, Map<String, String> extraProps) throws Exception {
         QueueProperties queue = new QueueProperties(base.toString(), maxDepth, Duration.ZERO,
-                Durability.SYNC_ON_COMMIT, OnWriteError.HALT, batchSize, 200L, policy);
-        SinkProperties props = new SinkProperties(id, bootstrap, "all", 0, "lz4", 1_048_576, Map.of(), queue);
+                Durability.SYNC_ON_COMMIT, OnWriteError.HALT, batchSize, 200L, policy,
+                policy == OverflowPolicy.BLOCK ? OnPoison.HALT : OnPoison.DROP);
+        SinkProperties props = new SinkProperties(id, bootstrap, "all", 0, "lz4", 1_048_576, extraProps, queue);
         SinkChannel ch = SinkChannel.open(props);
         ch.startForwarder();
         return ch;
@@ -429,5 +436,88 @@ class PartitionPreserveIT {
             }
             producer.flush();
         }
+    }
+
+    // ---------- onPoison=halt: registro rejeitado em definitivo não se perde ----------
+
+    @Test
+    void registroRejeitadoEmDefinitivoParaSoEsseDestinoSemPerdaEOutrasRotasSeguem(@TempDir Path tmp)
+            throws Exception {
+        String srcA = "poison.srcA." + UUID.randomUUID();
+        String dstA = "poison.dstA." + UUID.randomUUID();
+        String srcB = "poison.srcB." + UUID.randomUUID();
+        String dstB = "poison.dstB." + UUID.randomUUID();
+        String bootstrap = KAFKA.getBootstrapServers();
+        createTopic(bootstrap, srcA, 1);
+        createTopic(bootstrap, srcB, 1);
+        createTopic(bootstrap, dstB, 1);
+        // destino A aceita no máximo ~2 KB por batch: o registro de 5 KB é rejeitado em definitivo pelo broker
+        try (Admin admin = Admin.create(Map.of("bootstrap.servers", bootstrap))) {
+            admin.createTopics(List.of(new NewTopic(dstA, 1, (short) 1)
+                    .configs(Map.of("max.message.bytes", "2000")))).all().get();
+        }
+
+        // batch.size pequeno: o cliente só divide batches rejeitados com sucesso se batch.size < max.message.bytes
+        SinkChannel sinkA = openSink("sinkA", bootstrap, tmp.resolve("a"), 20, 10, OverflowPolicy.BLOCK,
+                Map.of("batch.size", "1000"));
+        SinkChannel sinkB = openSink("sinkB", bootstrap, tmp.resolve("b"), 1_000, 10, OverflowPolicy.DROP_OLDEST);
+        SourceConsumer sourceA = startSource("poison-a", bootstrap, "grp-a-" + UUID.randomUUID(), 5, Map.of(),
+                RouteTable.build(List.of(new RouteProperties("a", "poison-a", srcA,
+                        List.of(new RouteTarget("sinkA", dstA)))), Map.<String, SinkTarget>of("sinkA", sinkA)));
+        SourceConsumer sourceB = startSource("poison-b", bootstrap, "grp-b-" + UUID.randomUUID(), 5, Map.of(),
+                RouteTable.build(List.of(new RouteProperties("b", "poison-b", srcB,
+                        List.of(new RouteTarget("sinkB", dstB)))), Map.<String, SinkTarget>of("sinkB", sinkB)));
+        try {
+            try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerProps(bootstrap))) {
+                byte[] big = new byte[5_000];
+                new java.util.Random(7).nextBytes(big);   // incompressível: lz4 não pode reduzir abaixo do limite
+                for (int i = 0; i < 46; i++) {
+                    byte[] value = i == 5 ? big : ("a" + i).getBytes(StandardCharsets.UTF_8);
+                    producer.send(new ProducerRecord<>(srcA, 0, null, ("k" + i).getBytes(StandardCharsets.UTF_8), value));
+                }
+                for (int i = 0; i < 10; i++) {
+                    producer.send(new ProducerRecord<>(srcB, 0, null, null, ("b" + i).getBytes(StandardCharsets.UTF_8)));
+                }
+                producer.flush();
+            }
+
+            await().atMost(Duration.ofSeconds(60)).until(sinkA::halted);
+            await().atMost(Duration.ofSeconds(60)).until(() -> source(sourceA).pausedPartitions() == 1);
+            assertThat(sinkA.haltedReason()).contains("RecordTooLargeException").contains(srcA);
+            assertThat(sinkA.poisonedTotal()).isZero();
+            assertThat(sinkA.dropped()).isZero();
+            assertThat(sinkA.saturated()).isTrue();
+
+            // as outras rotas seguem normais, inclusive registros produzidos DEPOIS da parada
+            await().atMost(Duration.ofSeconds(60)).until(() -> sinkB.publishedTotal() == 10);
+            try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerProps(bootstrap))) {
+                producer.send(new ProducerRecord<>(srcB, 0, null, null, "b-late".getBytes(StandardCharsets.UTF_8))).get();
+            }
+            await().atMost(Duration.ofSeconds(60)).until(() -> sinkB.publishedTotal() == 11);
+            assertThat(sinkB.halted()).isFalse();
+
+            // sem perda: tudo que a origem A consumiu foi entregue ou está na fila (inclusive o inválido)
+            long consumed = sourceA.consumedTotal();
+            assertThat(sinkA.publishedTotal() + sinkA.depth()).isEqualTo(consumed);
+            assertThat(consumed).isLessThan(46);   // a origem foi freada pela fila cheia
+        } finally {
+            sourceA.stop();
+            sourceB.stop();
+            sinkA.close();
+            sinkB.close();
+        }
+
+        // o registro inválido continua na cabeça da fila em disco (será reenviado ao reiniciar)
+        QueueProperties reopen = new QueueProperties(tmp.resolve("a").toString(), 20, Duration.ZERO,
+                Durability.SYNC_ON_COMMIT, OnWriteError.HALT, 10, 200L, OverflowPolicy.BLOCK, OnPoison.HALT);
+        try (var queue = dev.nishisan.nstreamreplay.sink.DurableSinkQueue.open("sinkA", reopen)) {
+            ReplayRecord head = queue.peekBatch().get(0);
+            assertThat(head.offset()).isEqualTo(5L);
+            assertThat(head.valueSize()).isEqualTo(5_000);
+        }
+    }
+
+    private static SourceConsumer source(SourceConsumer c) {
+        return c;
     }
 }

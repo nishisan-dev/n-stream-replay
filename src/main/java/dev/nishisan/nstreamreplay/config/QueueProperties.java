@@ -27,6 +27,9 @@ import java.time.Duration;
  * @param forwarderRetryBackoffMs backoff (ms) quando o broker do destino está fora
  * @param overflowPolicy          o que fazer ao atingir {@code maxDepth} ({@link OverflowPolicy});
  *                                default {@code drop-oldest}
+ * @param onPoison                o que fazer com registro rejeitado em definitivo pelo Kafka
+ *                                ({@link OnPoison}); default {@code drop}. {@code overflowPolicy=block}
+ *                                exige {@code halt}
  */
 public record QueueProperties(
         @NotBlank @DefaultValue("var/n-stream-replay/queues") String basePath,
@@ -36,18 +39,33 @@ public record QueueProperties(
         @NotNull @DefaultValue("drop") OnWriteError onWriteError,
         @Positive @DefaultValue("256") int batchSize,
         @PositiveOrZero @DefaultValue("1000") long forwarderRetryBackoffMs,
-        @NotNull @DefaultValue("drop-oldest") OverflowPolicy overflowPolicy) {
+        @NotNull @DefaultValue("drop-oldest") OverflowPolicy overflowPolicy,
+        @NotNull @DefaultValue("drop") OnPoison onPoison) {
 
     @ConstructorBinding
     public QueueProperties {
         overflowPolicy = overflowPolicy == null ? OverflowPolicy.DROP_OLDEST : overflowPolicy;
+        onPoison = onPoison == null ? OnPoison.DROP : onPoison;
+    }
+
+    /** Construtor sem {@code onPoison}: mantém o descarte de registros inválidos ({@code drop}). */
+    public QueueProperties(String basePath, int maxDepth, Duration retentionTime, Durability durability,
+                           OnWriteError onWriteError, int batchSize, long forwarderRetryBackoffMs,
+                           OverflowPolicy overflowPolicy) {
+        this(basePath, maxDepth, retentionTime, durability, onWriteError, batchSize,
+                forwarderRetryBackoffMs, overflowPolicy, OnPoison.DROP);
     }
 
     /** Construtor sem {@code overflowPolicy}: mantém o comportamento histórico ({@code drop-oldest}). */
     public QueueProperties(String basePath, int maxDepth, Duration retentionTime, Durability durability,
                            OnWriteError onWriteError, int batchSize, long forwarderRetryBackoffMs) {
         this(basePath, maxDepth, retentionTime, durability, onWriteError, batchSize,
-                forwarderRetryBackoffMs, OverflowPolicy.DROP_OLDEST);
+                forwarderRetryBackoffMs, OverflowPolicy.DROP_OLDEST, OnPoison.DROP);
+    }
+
+    /** Um registro rejeitado em definitivo para o forwarder do destino em vez de ser descartado? */
+    public boolean haltsOnPoison() {
+        return onPoison == OnPoison.HALT;
     }
 
     /** A fila nunca descarta por contagem e freia a origem ao atingir {@link #maxDepth}? */

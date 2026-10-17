@@ -133,6 +133,15 @@ public final class SinkChannel implements SinkTarget, Closeable {
         return forwarder.retryBackoffs();
     }
 
+    /** Forwarder parado por veneno (onPoison=halt): nada mais é entregue a este destino. */
+    public boolean halted() {
+        return forwarder.halted();
+    }
+
+    public String haltedReason() {
+        return forwarder.haltedReason();
+    }
+
     public boolean online() {
         return forwarder.online();
     }

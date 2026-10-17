@@ -182,7 +182,7 @@ class NStreamReplayPropertiesBindingTest {
                   sinks:
                     - id: blocking
                       bootstrapServers: "host:9092"
-                      queue: { maxDepth: 500, overflowPolicy: block, onWriteError: halt, retentionTime: 0s }
+                      queue: { maxDepth: 500, overflowPolicy: block, onWriteError: halt, onPoison: halt, retentionTime: 0s }
                     - id: dropping
                       bootstrapServers: "host:9092"
                   routes:
@@ -193,6 +193,8 @@ class NStreamReplayPropertiesBindingTest {
 
         assertThat(props.sinks().get(0).queue().overflowPolicy()).isEqualTo(OverflowPolicy.BLOCK);
         assertThat(props.sinks().get(0).queue().blocksOnOverflow()).isTrue();
+        assertThat(props.sinks().get(0).queue().onPoison()).isEqualTo(OnPoison.HALT);
+        assertThat(props.sinks().get(1).queue().onPoison()).isEqualTo(OnPoison.DROP);
         assertThat(props.sinks().get(1).queue().overflowPolicy()).isEqualTo(OverflowPolicy.DROP_OLDEST);
     }
 
@@ -208,6 +210,7 @@ class NStreamReplayPropertiesBindingTest {
         assertThat(queue.onWriteError()).isEqualTo(OnWriteError.HALT);
         assertThat(queue.durability()).isEqualTo(Durability.SYNC_ON_COMMIT);
         assertThat(queue.hasRetentionTime()).isFalse();
+        assertThat(queue.onPoison()).isEqualTo(OnPoison.HALT);
         RouteTarget target = props.routes().get(0).to().get(0);
         assertThat(target.partitioning()).isEqualTo(Partitioning.PRESERVE);
         assertThat(target.partitionKey()).isNull();

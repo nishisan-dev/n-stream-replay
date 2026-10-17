@@ -2,8 +2,6 @@ package dev.nishisan.nstreamreplay.config;
 
 import dev.nishisan.nstreamreplay.decoder.Decoders;
 import dev.nishisan.nstreamreplay.route.PartitionKey;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
@@ -25,8 +23,6 @@ import java.util.function.Function;
  */
 @Component
 public class ConfigValidator {
-
-    private static final Logger LOG = LoggerFactory.getLogger(ConfigValidator.class);
 
     public ConfigValidator(NStreamReplayProperties properties) {
         validate(properties);
@@ -105,24 +101,29 @@ public class ConfigValidator {
     }
 
     /**
-     * Regras da fila durável de um destino. {@code overflowPolicy=block} promete não descartar
-     * nada; por isso não admite {@code retentionTime} (expiração por tempo descartaria backlog) e
-     * deve ser usado com {@code onWriteError=halt} (com {@code drop} uma falha de escrita local
-     * ainda descartaria o registro — apenas avisado, pois o operador pode aceitar esse risco).
+     * Regras da fila durável de um destino. {@code overflowPolicy=block} promete zero perda; por
+     * isso não admite {@code retentionTime} (a expiração por tempo descartaria backlog), exige
+     * {@code onWriteError=halt} (com {@code drop} uma falha de escrita local descartaria o registro)
+     * e {@code onPoison=halt} (com {@code drop} um registro rejeitado em definitivo pelo Kafka
+     * seria descartado depois do commit da origem).
      */
     private static void validateQueue(SinkProperties sink) {
         QueueProperties queue = sink.queue();
         if (queue == null || !queue.blocksOnOverflow()) {
             return;
         }
+        String context = "sink '" + sink.id() + "': overflowPolicy=block (zero perda) ";
         if (queue.hasRetentionTime()) {
-            throw new IllegalStateException("sink '" + sink.id() + "': overflowPolicy=block é incompatível com "
-                    + "retentionTime > 0 (a expiração por tempo descartaria registros). Use retentionTime: 0s");
+            throw new IllegalStateException(context + "é incompatível com retentionTime > 0 "
+                    + "(a expiração por tempo descartaria registros). Use retentionTime: 0s");
         }
         if (queue.onWriteError() != OnWriteError.HALT) {
-            LOG.warn("sink '{}': overflowPolicy=block com onWriteError={} — uma falha de escrita local ainda "
-                    + "descarta o registro; use onWriteError=halt para não perder nada", sink.id(),
-                    queue.onWriteError());
+            throw new IllegalStateException(context + "exige onWriteError: halt "
+                    + "(com drop, uma falha de escrita local descartaria o registro)");
+        }
+        if (!queue.haltsOnPoison()) {
+            throw new IllegalStateException(context + "exige onPoison: halt "
+                    + "(com drop, um registro rejeitado em definitivo pelo Kafka seria descartado)");
         }
     }
 

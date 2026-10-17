@@ -418,6 +418,12 @@ public final class SourceConsumer implements Runnable, AutoCloseable {
         @Override
         public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
             LOG.info("[{}] partições atribuídas: {}", props.id(), partitions);
+            // Partições novas nascem despausadas: freia já as de destino saturado, antes do próximo
+            // poll devolver registros delas (evita exceder um lote logo após o rebalance).
+            Consumer<byte[], byte[]> c = consumer;
+            if (c != null) {
+                applyBackpressure(c);
+            }
         }
     }
 }

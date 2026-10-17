@@ -463,4 +463,48 @@ class SourceConsumerTest {
         assertThat(t.isAlive()).isFalse();
         assertThat(commits.get()).isZero();   // nada foi commitado: o lote será relido (at-least-once)
     }
+
+    @Test
+    void pausaNoRebalanceAsParticoesDeDestinoSaturadoAntesDoPrimeiroRegistro() throws Exception {
+        TopicPartition tp = new TopicPartition("t", 0);
+        java.util.concurrent.atomic.AtomicReference<org.apache.kafka.clients.consumer.ConsumerRebalanceListener> listener =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        // MockConsumer não dispara callbacks de rebalance: captura o listener e o aciona no rebalance().
+        MockConsumer<byte[], byte[]> mock = new MockConsumer<>(OffsetResetStrategy.EARLIEST) {
+            @Override
+            public synchronized void subscribe(java.util.Collection<String> topics,
+                                               org.apache.kafka.clients.consumer.ConsumerRebalanceListener l) {
+                listener.set(l);
+                super.subscribe(topics, l);
+            }
+
+            @Override
+            public synchronized void rebalance(java.util.Collection<TopicPartition> newAssignment) {
+                super.rebalance(newAssignment);
+                listener.get().onPartitionsAssigned(newAssignment);
+            }
+        };
+        mock.schedulePollTask(() -> {
+            mock.rebalance(List.of(tp));
+            mock.updateBeginningOffsets(Map.of(tp, 0L));
+            mock.addRecord(kafkaRec("t", 0, 0L, "1"));   // chega no MESMO poll do rebalance
+        });
+        FakeSinkTarget slow = new FakeSinkTarget("slow", false);
+        slow.saturated = true;
+        SourceConsumer consumer = new SourceConsumer(source("s1"), singleRoute("s1", "t", slow), NOOP, () -> mock);
+
+        Thread t = new Thread(consumer, "rebalance-source");
+        t.start();
+        try {
+            await().atMost(Duration.ofSeconds(5)).until(() -> mock.paused().contains(tp));
+            Thread.sleep(300);
+            assertThat(slow.received).isEmpty();   // sem o pause no onPartitionsAssigned o registro vazaria
+
+            slow.saturated = false;
+            await().atMost(Duration.ofSeconds(5)).until(() -> slow.received.size() == 1);
+        } finally {
+            consumer.stop();
+            t.join(5_000);
+        }
+    }
 }

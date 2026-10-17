@@ -373,4 +373,94 @@ class SourceConsumerTest {
             t.join(5_000);
         }
     }
+
+    @Test
+    void commitSoAcontecaDepoisDoEnfileiramentoESyncDuraveis() throws Exception {
+        TopicPartition tp = new TopicPartition("t", 0);
+        List<String> events = java.util.Collections.synchronizedList(new ArrayList<>());
+        MockConsumer<byte[], byte[]> mock = new MockConsumer<>(OffsetResetStrategy.EARLIEST) {
+            @Override
+            public void commitSync() {
+                events.add("commit");
+                super.commitSync();
+            }
+        };
+        mock.schedulePollTask(() -> {
+            mock.rebalance(List.of(tp));
+            mock.updateBeginningOffsets(Map.of(tp, 0L));
+            mock.addRecord(kafkaRec("t", 0, 0L, "1"));
+            mock.addRecord(kafkaRec("t", 0, 1L, "2"));
+        });
+        FakeSinkTarget target = new FakeSinkTarget("d", true) {
+            @Override
+            public boolean offer(ReplayRecord record) {
+                events.add("offer");
+                return super.offer(record);
+            }
+
+            @Override
+            public void sync() {
+                events.add("sync");
+                super.sync();
+            }
+        };
+        SourceConsumer consumer = new SourceConsumer(source("s1"), singleRoute("s1", "t", target), NOOP, () -> mock);
+
+        Thread t = new Thread(consumer, "order-source");
+        t.start();
+        try {
+            await().atMost(Duration.ofSeconds(5)).until(() -> events.contains("commit"));
+            assertThat(events).containsExactly("offer", "offer", "sync", "commit");
+        } finally {
+            consumer.stop();
+            t.join(5_000);
+        }
+    }
+
+    @Test
+    void falhaDeEscritaLocalSobHaltInterrompeSemCommitar() throws Exception {
+        TopicPartition tp = new TopicPartition("t", 0);
+        java.util.concurrent.atomic.AtomicInteger commits = new java.util.concurrent.atomic.AtomicInteger();
+        MockConsumer<byte[], byte[]> mock = new MockConsumer<>(OffsetResetStrategy.EARLIEST) {
+            @Override
+            public void commitSync() {
+                commits.incrementAndGet();
+                super.commitSync();
+            }
+        };
+        mock.schedulePollTask(() -> {
+            mock.rebalance(List.of(tp));
+            mock.updateBeginningOffsets(Map.of(tp, 0L));
+            mock.addRecord(kafkaRec("t", 0, 0L, "1"));
+        });
+        // onWriteError=halt: o canal relança a IOException de escrita local
+        SinkTarget target = new SinkTarget() {
+            @Override
+            public String id() {
+                return "d";
+            }
+
+            @Override
+            public boolean offer(ReplayRecord record) throws java.io.IOException {
+                throw new java.io.IOException("disco cheio");
+            }
+
+            @Override
+            public boolean requiresSyncBeforeCommit() {
+                return false;
+            }
+
+            @Override
+            public void sync() {
+            }
+        };
+        SourceConsumer consumer = new SourceConsumer(source("s1"), singleRoute("s1", "t", target), NOOP, () -> mock);
+
+        Thread t = new Thread(consumer, "halt-source");
+        t.start();
+        t.join(5_000);
+
+        assertThat(t.isAlive()).isFalse();
+        assertThat(commits.get()).isZero();   // nada foi commitado: o lote será relido (at-least-once)
+    }
 }

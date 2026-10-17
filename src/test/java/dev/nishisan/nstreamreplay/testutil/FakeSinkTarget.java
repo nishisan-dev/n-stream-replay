@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /** {@link SinkTarget} de teste que registra os registros enfileirados e as chamadas de sync. */
-public final class FakeSinkTarget implements SinkTarget {
+public class FakeSinkTarget implements SinkTarget {
 
     private final String id;
     private final boolean requiresSync;

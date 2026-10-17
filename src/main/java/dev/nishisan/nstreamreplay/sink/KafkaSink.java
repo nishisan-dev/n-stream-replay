@@ -64,6 +64,19 @@ public final class KafkaSink implements Sink {
     }
 
     private static Producer<byte[], byte[]> buildProducer(SinkProperties s) {
+        return new KafkaProducer<>(producerProperties(s));
+    }
+
+    /**
+     * Propriedades do producer (visível para teste). Garante a <b>ordem por partição</b> mesmo com
+     * retry: com idempotência (acks=all) o broker deduplica e reordena por sequência, e
+     * {@code max.in.flight <= 5} é seguro; sem idempotência, mais de um request em voo por conexão
+     * permite que um batch retentado ultrapasse o seguinte, então fixa-se
+     * {@code max.in.flight.requests.per.connection=1} (a menos que o operador o defina em
+     * {@code extraProps}). O custo é pequeno: o forwarder já envia o lote, faz {@code flush} e
+     * espera a confirmação antes de seguir.
+     */
+    static Properties producerProperties(SinkProperties s) {
         Properties p = new Properties();
         p.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, s.bootstrapServers());
         p.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
@@ -79,9 +92,13 @@ public final class KafkaSink implements Sink {
         // Idempotência remove duplicatas de retry intra-sessão do producer (exige acks=all).
         boolean acksAll = "all".equalsIgnoreCase(s.acks()) || "-1".equals(s.acks());
         p.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, acksAll);
-        // Passthrough cru por último: o usuário pode sobrescrever qualquer chave acima.
+        // Passthrough cru: o usuário pode sobrescrever qualquer chave acima.
         s.extraProps().forEach(p::put);
-        return new KafkaProducer<>(p);
+        boolean idempotent = Boolean.parseBoolean(String.valueOf(p.get(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG)));
+        if (!idempotent) {
+            p.putIfAbsent(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 1);
+        }
+        return p;
     }
 
     @Override
@@ -97,15 +114,23 @@ public final class KafkaSink implements Sink {
                         rec.sourceTopic(), rec.partition(), rec.offset());
                 futures.add(null);
             } else {
-                futures.add(producer.send(toProducerRecord(rec)));
+                Future<RecordMetadata> sent = producer.send(toProducerRecord(rec));
+                futures.add(sent);
+                if (failedTransientlyAlready(sent)) {
+                    // O envio já falhou de forma transitória (ex.: partição/tópico ausente após
+                    // max.block.ms). Enviar o resto do lote só gastaria max.block.ms por item e
+                    // entregaria registros além do ponto de falha, que serão reenviados em ordem.
+                    break;
+                }
             }
         }
         producer.flush();
         int published = 0;
         int poisoned = 0;
         // Avaliação em ordem: prefixo contíguo de entregues + venenos; o primeiro erro
-        // transitório encerra o prefixo (restante fica na fila).
-        for (int i = 0; i < n; i++) {
+        // transitório encerra o prefixo (restante fica na fila). futures.size() < n quando o
+        // envio foi interrompido por uma falha transitória imediata.
+        for (int i = 0; i < futures.size(); i++) {
             Future<RecordMetadata> f = futures.get(i);
             if (f == null) {
                 poisoned++;
@@ -131,6 +156,22 @@ public final class KafkaSink implements Sink {
             }
         }
         return new PublishOutcome(published, poisoned);
+    }
+
+    /** O future já terminou com erro que não é permanente (portanto o registro deve ser retentado)? */
+    private static boolean failedTransientlyAlready(Future<RecordMetadata> future) {
+        if (!future.isDone()) {
+            return false;
+        }
+        try {
+            future.get();
+            return false;
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (ExecutionException ee) {
+            return !isNonRetryable(ee.getCause());
+        }
     }
 
     private ProducerRecord<byte[], byte[]> toProducerRecord(ReplayRecord rec) {

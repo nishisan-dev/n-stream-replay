@@ -145,4 +145,63 @@ class KafkaSinkTest {
         assertThat(producer.sent.get(1).partition()).isNull();   // sem partição = pela key
         assertThat(producer.sent.get(1).key()).isEqualTo(rawKey);
     }
+
+    @Test
+    void naoEnviaORestoDoLoteAposFalhaTransitoriaImediata() {
+        ScriptedProducer producer = new ScriptedProducer();
+        producer.scriptSuccess();
+        producer.scriptError(new TimeoutException("partição ausente no metadata"));
+        producer.scriptSuccess();
+        producer.scriptSuccess();
+        try (KafkaSink sink = new KafkaSink(producer, 0)) {
+            PublishOutcome outcome = sink.publish(List.of(rec(1), rec(1), rec(1), rec(1)));
+            assertThat(outcome.published()).isEqualTo(1);
+            assertThat(outcome.poisoned()).isZero();
+            assertThat(outcome.acked()).isEqualTo(1);        // o registro que falhou NÃO é descartado
+        }
+        // Nada além do ponto de falha foi enviado: evita max.block.ms por item e reordenação.
+        assertThat(producer.sent).hasSize(2);
+    }
+
+    @Test
+    void falhaDeParticaoInvalidaMantemORegistroNaFila() {
+        ScriptedProducer producer = new ScriptedProducer();
+        producer.scriptError(new TimeoutException(
+                "Partition 9 of topic dest with partition count 4 is not present in metadata after 5000 ms."));
+        ReplayRecord pinned = new ReplayRecord("src", 9, 1L, 1L, null, new byte[]{1}, Map.of(), "dest", 9);
+        try (KafkaSink sink = new KafkaSink(producer, 0)) {
+            PublishOutcome outcome = sink.publish(List.of(pinned));
+            assertThat(outcome.acked()).isZero();
+            assertThat(outcome.poisoned()).isZero();
+        }
+    }
+
+    private static dev.nishisan.nstreamreplay.config.SinkProperties sinkProps(String acks, Map<String, String> extra) {
+        return new dev.nishisan.nstreamreplay.config.SinkProperties("d", "h:9092", acks, 0, "lz4", 1_048_576, extra,
+                new dev.nishisan.nstreamreplay.config.QueueProperties("var/q", 10,
+                        Duration.ZERO, dev.nishisan.nstreamreplay.config.Durability.OS_MANAGED,
+                        dev.nishisan.nstreamreplay.config.OnWriteError.HALT, 10, 10L));
+    }
+
+    @Test
+    void semIdempotenciaLimitaUmRequestEmVooParaPreservarOrdemNoRetry() {
+        var p = KafkaSink.producerProperties(sinkProps("1", Map.of()));
+        assertThat(p.get("enable.idempotence")).isEqualTo(false);
+        assertThat(p.get("max.in.flight.requests.per.connection")).isEqualTo(1);
+    }
+
+    @Test
+    void comAcksAllUsaIdempotenciaSemLimitarEmVoo() {
+        var p = KafkaSink.producerProperties(sinkProps("all", Map.of()));
+        assertThat(p.get("enable.idempotence")).isEqualTo(true);
+        assertThat(p).doesNotContainKey("max.in.flight.requests.per.connection");
+    }
+
+    @Test
+    void extraPropsDoOperadorTemPrecedenciaSobreOEmVoo() {
+        var p = KafkaSink.producerProperties(sinkProps("1", Map.of("max.in.flight.requests.per.connection", "3")));
+        assertThat(p.get("max.in.flight.requests.per.connection")).isEqualTo("3");
+        var q = KafkaSink.producerProperties(sinkProps("1", Map.of("enable.idempotence", "true", "acks", "all")));
+        assertThat(q).doesNotContainKey("max.in.flight.requests.per.connection");
+    }
 }

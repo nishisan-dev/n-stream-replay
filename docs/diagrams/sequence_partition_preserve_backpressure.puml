@@ -1,0 +1,46 @@
+@startuml sequence_partition_preserve_backpressure
+title n-stream-replay — partitioning: preserve e backpressure (overflowPolicy: block)
+
+skinparam shadowing false
+participant "Kafka origem\n(4 partições)" as src
+participant "SourceConsumer\n(thread/origem)" as sc
+participant "DurableSinkQueue\n(block, maxDepth=N)" as q
+participant "SinkForwarder" as fw
+participant "Kafka destino\n(>= 4 partições)" as dst
+
+== Subida ==
+sc -> src : Admin.describeTopics(fromTopic)
+sc -> dst : Admin.describeTopics(toTopic)
+note over sc
+  Destino ausente ou com menos partições
+  que a origem: a aplicação não sobe.
+end note
+
+== Ingestão com partição preservada ==
+loop antes de cada poll
+  sc -> q : saturated() ?
+  alt saturada
+    sc -> src : pause(partições do tópico roteado)
+  else drenou até N/2
+    sc -> src : resume(partições)
+  end
+end
+src -> sc : poll() -> registros (partição P, key crua, headers)
+sc -> q : offer(ReplayRecord{destinationPartition = P})
+sc -> q : sync() (fsync)
+sc -> src : commitSync()
+
+== Entrega ==
+fw -> q : peekBatch()
+fw -> dst : send(ProducerRecord{partition = P, key crua, headers})
+dst --> fw : ok / falha transitória (registro fica na fila)
+fw -> q : ack(prefixo entregue)
+
+note over q
+  block: offer nunca descarta.
+  Ao atingir maxDepth a fila fica saturada
+  e só volta a aceitar origem em maxDepth/2.
+  poll continua sendo chamado (pausado devolve vazio):
+  sem estouro de max.poll.interval.ms, sem rebalance.
+end note
+@enduml

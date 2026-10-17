@@ -1,0 +1,50 @@
+# ════════════════════════════════════════════════════════════════════════════
+#  Espelho de um tópico de CDC com partições preservadas e fila SEM descarte.
+#
+#  Cenário: espelhar fault.alarms.cdc (4 partições) de produção para um broker de dev. O
+#  produtor publica marcadores de controle (reset, snapshot_end, resume, retain) UMA VEZ EM
+#  CADA PARTIÇÃO, todos com a mesma key, e o consumidor reconstrói o estado POR PARTIÇÃO.
+#  Reparticionar pela key jogaria as 4 cópias do marcador numa partição só.
+#
+#  - partitioning: preserve  → o registro da partição P da origem vai para a partição P do
+#                              destino (key em bytes crus e headers intactos).
+#  - Pré-requisito: o tópico de destino já existe, com pelo menos 4 partições (a aplicação
+#    NÃO cria tópicos e não sobe se a checagem falhar).
+#  - Sink dedicado ao espelho: overflowPolicy=block + onWriteError=halt + retentionTime=0s +
+#    durability=sync-on-commit ⇒ nada é descartado; fila cheia ou destino fora freiam a
+#    origem (pause nas partições) em vez de perder registros.
+#  - O espelho é at-least-once: pode haver duplicatas, nunca perda (o consumidor deve ser
+#    idempotente).
+# ════════════════════════════════════════════════════════════════════════════
+nstreamreplay:
+  sources:
+    - id: prod-cdc
+      bootstrapServers: "kafka-prod:9092"
+      groupId: "n-stream-replay.cdc-mirror"
+      autoOffsetReset: earliest
+      maxPollRecords: 500
+      extraProps: {}                       # SASL/TLS da origem, se houver
+
+  sinks:
+    - id: dev-cdc-mirror                   # sink DEDICADO: não compartilhe com rotas que aceitam perda
+      bootstrapServers: "kafka-dev:9092"
+      acks: all                            # idempotência: ordem por partição preservada no retry
+      lingerMs: 5
+      compressionType: lz4
+      queue:
+        basePath: "var/n-stream-replay/queues"
+        maxDepth: 200000                   # marca d'água: ao atingir, a origem é freada (pode exceder em até 1 lote)
+        overflowPolicy: block              # nunca descarta (default: drop-oldest)
+        retentionTime: 0s                  # obrigatório com block (expiração por tempo descartaria)
+        onWriteError: halt                 # falha de escrita local para a origem sem commitar
+        durability: sync-on-commit
+        batchSize: 256
+        forwarderRetryBackoffMs: 1000
+
+  routes:
+    - id: alarms-cdc-mirror
+      source: prod-cdc
+      fromTopic: fault.alarms.cdc
+      to:
+        # toTopic omitido = mesmo nome no destino; partitioning: preserve não aceita partitionKey.
+        - { sink: dev-cdc-mirror, partitioning: preserve }

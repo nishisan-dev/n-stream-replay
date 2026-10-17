@@ -24,12 +24,13 @@ A aplicação é um **Spring Boot web servlet** apenas para expor métricas em `
 | Componente | Papel |
 |---|---|
 | `ReplayEngine` (`SmartLifecycle`) | Constrói e possui as instâncias dinâmicas; start/stop ordenado (forwarders **antes** das origens); tick de métricas. |
-| `SourceConsumer` (1 thread/origem) | `KafkaConsumer` cru, `enable.auto.commit=false`; assina a união dos `fromTopic`; **roteia cada record por tópico** (resolve destino + `destinationTopic`); rate limit opcional via `ConsumeRateLimiter` (`maxConsumeRatePerSec`); group-commit (sync) **antes** do `commitSync`. |
-| `RouteTable` | Resolve, no boot, **origem → (tópico → alvos)**; alvo = `{sink, toTopic?, partitionKey?}` (toTopic ausente = preserva). |
+| `SourceConsumer` (1 thread/origem) | `KafkaConsumer` cru, `enable.auto.commit=false`; assina a união dos `fromTopic`; **roteia cada record por tópico** (resolve destino + `destinationTopic`); rate limit opcional via `ConsumeRateLimiter` (`maxConsumeRatePerSec`); group-commit (sync) **antes** do `commitSync`; backpressure: `pause()`/`resume()` das partições cujo tópico roteia para um destino saturado, sem parar o loop de `poll`. |
+| `RouteTable` | Resolve, no boot, **origem → (tópico → alvos)**; alvo = `{sink, toTopic?, partitionKey?, partitioning}` (toTopic ausente = preserva o nome; `partitioning` = `key` ou `preserve`). |
+| `PartitionPreserveCheck` | Checagem de subida (antes de abrir filas/producers): para cada alvo `preserve`, consulta origem e destino via `Admin` e aborta se o destino não existir, tiver menos partições que a origem ou se um cluster não puder ser consultado. Não cria tópicos. |
 | `Decoder` + `PartitionKey` | Decodificam JSON/YAML uma vez por mensagem quando necessário e extraem um escalar por caminho compilado. Texto é o default; custom reservado. |
 | `SinkChannel` (1 por destino) | Unidade de **isolamento**: agrega fila + producer + forwarder + thread. |
-| `DurableSinkQueue` | Dupla-fila `backlog`+`retry`; no move, mantém o lock do backlog apenas no `poll` e persiste na retry depois de liberá-lo; drop-oldest por contagem/tempo; at-least-once. |
-| `KafkaSink` | `KafkaProducer` cru; publica no `record.destinationTopic()` (resolvido pela rota); preserva key/value/headers/timestamp; guarda de oversize; poison vs transitório. |
+| `DurableSinkQueue` | Dupla-fila `backlog`+`retry`; no move, mantém o lock do backlog apenas no `poll` e persiste na retry depois de liberá-lo; `overflowPolicy` `drop-oldest` (default, por contagem/tempo) ou `block` (nunca descarta; expõe `saturated()` com histerese `maxDepth` → `maxDepth/2`); at-least-once. |
+| `KafkaSink` | `KafkaProducer` cru; publica no `record.destinationTopic()` (resolvido pela rota); preserva key/value/headers/timestamp; publica na `destinationPartition` quando houver (senão o producer particiona pela key); guarda de oversize; poison vs transitório; `max.in.flight=1` sem idempotência. |
 | `SinkForwarder` (1 thread/destino) | Drena → publica → confirma o prefixo entregue; backoff em broker-down; sweep de expirados. |
 | `ReplayMetrics` + `StatsUtils` | Exporta métricas em `/actuator/prometheus`. |
 
@@ -57,25 +58,39 @@ após sincronizar os alvos válidos. Duplicatas de destino com política igual s
 políticas diferentes (incluindo chave ausente ou decoder efetivo diferente para extração) para o mesmo source/fromTopic/sink/toTopic
 resolvido impedem o boot, mesmo quando declaradas em rotas distintas.
 
+### Partições preservadas (`partitioning: preserve`)
+
+![Partições preservadas e backpressure](https://uml.nishisan.dev/proxy?src=https://raw.githubusercontent.com/nishisan-dev/n-stream-replay/main/docs/diagrams/sequence_partition_preserve_backpressure.puml)
+
+No modo `preserve` o `SourceConsumer` grava no `ReplayRecord` a **partição de destino** (`destinationPartition`) igual à partição de origem do record, e o `KafkaSink` a repassa ao `ProducerRecord`; a key (bytes crus) e os headers seguem sem alteração. Sem `preserve` o campo é `null` e o producer particiona pela key (comportamento histórico).
+
+- **Pré-requisitos validados na subida:** `preserve` + `partitionKey` no mesmo alvo é erro do `ConfigValidator`; o `PartitionPreserveCheck` exige destino existente com pelo menos tantas partições quanto a origem (a aplicação não cria tópicos).
+- **Formato persistido:** `destinationPartition` é um campo novo, ao final do record, com o mesmo `serialVersionUID` (2). Filas gravadas pela v2.3.x são lidas normalmente (campo ausente = `null` = pela key); a fixture `src/test/resources/fixtures/queue-v2.3.1` é uma fila real gravada pela 2.3.1. Rebaixar para a 2.3.x ignora a partição gravada.
+- **Partição inexistente no destino:** o `KafkaProducer` falha o envio com `TimeoutException` (retryable) após `max.block.ms`; o `KafkaSink` trata como falha transitória, **mantém o registro na fila** e não envia o restante do lote, que seria reenviado de qualquer forma.
+
+### Backpressure (`overflowPolicy: block`)
+
+Com `block`, `DurableSinkQueue.offer` nunca descarta. Ao atingir `maxDepth` a fila fica `saturated()`; só volta a ficar livre quando a profundidade cai a `maxDepth/2`. Antes de cada `poll`, o `SourceConsumer` reconcilia `pause()`/`resume()` com a saturação dos destinos de cada tópico e **continua chamando `poll`**, que não devolve registros das partições pausadas. Assim o consumer group mantém heartbeat e `max.poll.interval.ms` em dia e não sofre rebalance; o que não foi lido permanece no tópico de origem. `maxDepth` é uma marca d'água: pode ser excedida em até um lote (`maxPollRecords`) por origem. Um sink compartilhado por várias origens/rotas é consultado por todas (cada `SourceConsumer` pausa as suas partições). Um destino saturado freia todo tópico que roteia para ele, inclusive o fan-out para destinos saudáveis — use sink dedicado para espelhos sem perda.
+
 ## 5. Garantias de corretude
 
 - **At-least-once.** O offset da origem só é commitado **depois** de o lote ser enfileirado e sincronizado em **todas** as filas-destino tocadas. Após crash/restart pode haver **duplicatas** no destino (sem dedup) — sinks devem tolerar redelivery. A proveniência (`sourceTopic/partition/offset`) e o `destinationTopic` resolvido são gravados em cada registro.
 - **Durabilidade (`sync-on-commit`, default).** As filas abrem com `fsync=false` (rápido por registro) e a origem força `sync()` (fsync) das filas tocadas no boundary do batch, antes do commit. Um fsync por destino por poll-batch. Alternativas por destino: `per-record-fsync` (mais seguro/lento) e `os-managed` (mais rápido; aceita perda na cauda).
-- **Bounded drop-oldest.** A fila é limitada por `maxDepth` (contagem) e/ou `retentionTime` (tempo, via `expireAfterWrite` no backlog). Ao estourar, os registros **mais antigos não entregues são descartados** (perda intencional, contabilizada em `dropped`/`expired`). Itens reservados na `retry` nunca são descartados.
+- **Bounded drop-oldest (default).** A fila é limitada por `maxDepth` (contagem) e/ou `retentionTime` (tempo, via `expireAfterWrite` no backlog). Ao estourar, os registros **mais antigos não entregues são descartados** (perda intencional, contabilizada em `dropped`/`expired`). Itens reservados na `retry` nunca são descartados. Com `overflowPolicy: block` (exige `retentionTime: 0s`; usar com `onWriteError: halt`) **nada é descartado por contagem ou tempo**: a origem é freada (ver Backpressure). Continuam descartando, em qualquer política: registros venenosos (oversize / erro permanente do Kafka, `poisoned`) e, sob `onWriteError: drop`, falhas de escrita local — alerte em `poisoned_total` e `offer_errors_total`.
 - **Isolamento.** Cada destino tem fila/producer/forwarder próprios; um destino offline só faz crescer/dropar a sua fila, sem afetar a origem nem os demais destinos.
-- **Ordem.** 1 thread de poll por origem + 1 forwarder por destino ⇒ FIFO por destino e ordem por chave preservada. Alvos `{sink, destino}` idênticos no mesmo record são deduplicados. Invariante: nunca adicionar um 2º forwarder por fila sem sharding por `hash(key)`.
+- **Ordem.** 1 thread de poll por origem + 1 forwarder por destino ⇒ FIFO por destino e ordem por chave (ou por partição, em `preserve`) preservada. No producer: com `acks=all` há idempotência (o broker deduplica/ordena por sequência); sem ela o sink fixa `max.in.flight.requests.per.connection=1` (a menos que definido em `extraProps`), para que um batch retentado não ultrapasse o seguinte. Após uma falha transitória o lote não-confirmado é reenviado a partir do ponto de falha: registros posteriores podem já ter sido entregues e chegam duplicados, nunca perdidos (o consumidor do destino deve ser idempotente). Alvos `{sink, destino}` idênticos no mesmo record são deduplicados. Invariante: nunca adicionar um 2º forwarder por fila sem sharding por `hash(key)`.
 - **Poison vs transitório.** Erro não-retryable (`ApiException` não-`RetriableException`, ex.: `RecordTooLargeException`) e oversize pré-send são descartados (`poisoned`), avançando o FIFO; erro transitório (broker fora) mantém o lote na fila + backoff.
 
 ## 6. Configuração
 
-Configuração de app (sources/sinks/routes) em YAML externo: [`config/n-stream-replay.yaml`](../config/n-stream-replay.yaml). Ligada a `@ConfigurationProperties(prefix="nstreamreplay")` (constructor-binding a records imutáveis, `ignoreUnknownFields=false` = fail-loud). Validação cruzada (ids únicos, referências, decoder, caminho e conflitos de partitionKey) no boot pelo `ConfigValidator`, também chamada antes de abrir recursos no `ReplayEngine`. Importada via `spring.config.import` do `application.yml` interno; override por `--spring.config.additional-location`.
+Configuração de app (sources/sinks/routes) em YAML externo: [`config/n-stream-replay.yaml`](../config/n-stream-replay.yaml). Ligada a `@ConfigurationProperties(prefix="nstreamreplay")` (constructor-binding a records imutáveis, `ignoreUnknownFields=false` = fail-loud). Validação cruzada (ids únicos, referências, decoder, caminho e conflitos de partitionKey/partitioning, `preserve` com `partitionKey`, `block` com `retentionTime`) no boot pelo `ConfigValidator`, também chamada antes de abrir recursos no `ReplayEngine`. Importada via `spring.config.import` do `application.yml` interno; override por `--spring.config.additional-location`.
 
 ## 7. Métricas (`/actuator/prometheus`)
 
 Convenção `nstreamreplay.<dim>.<id>.<metric>`:
 
 - Por origem (totais cumulativos publicados como gauges): `source.<id>.consumed_total`, `source.<id>.commit_errors_total`.
-- Por destino (gauges, tick periódico): `sink.<id>.depth`, `sink.<id>.online` (1/0), `sink.<id>.published_total`, `sink.<id>.dropped_total`, `sink.<id>.expired_total`, `sink.<id>.poisoned_total`, `sink.<id>.offer_errors_total`, `sink.<id>.retry_backoffs_total`.
+- Por destino (gauges, tick periódico): `sink.<id>.depth`, `sink.<id>.saturated` (1/0, só `block`), `sink.<id>.online` (1/0), `sink.<id>.published_total`, `sink.<id>.dropped_total`, `sink.<id>.expired_total`, `sink.<id>.poisoned_total`, `sink.<id>.offer_errors_total`, `sink.<id>.retry_backoffs_total`.
 - Roteamento por origem: `source.<id>.decode_errors_total` (mensagens inválidas),
   `source.<id>.decode_dropped_total` (alvos descartados por decode),
   `source.<id>.partition_key_missing_dropped_total` (ausência/null) e
@@ -83,6 +98,7 @@ Convenção `nstreamreplay.<dim>.<id>.<metric>`:
   São acumulados desde o início do processo e exportados no tick periódico, inclusive
   com valor zero. Replays após falha de commit podem contar o descarte novamente.
   O relatório de stats inclui esses totais em `ROUTING`, sem misturar com drop de fila.
+- Backpressure por origem: `source.<id>.backpressure_pauses_total` (vezes em que houve `pause`) e `source.<id>.paused_partitions` (partições pausadas agora); o relatório de stats traz a seção `BACKPRESSURE`.
 - Diagnóstico da origem (totais cumulativos): `poll_nanos_total`, `limiter_wait_nanos_total`,
   `offer_nanos_total`, `sync_nanos_total`, `commit_nanos_total`, `polled_batches_total` e
   `configured_rate_per_sec`.

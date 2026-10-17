@@ -2,8 +2,11 @@
 #  n-stream-replay — configuração de relay Kafka store-and-forward (modelo de ROTAS)
 #
 #  Modelo (v2): ORIGENS (sources) e DESTINOS (sinks) são conexões puras (sem tópico
-#  fixo). As ROTAS amarram um tópico de origem a N alvos {sink, toTopic?, partitionKey?}:
+#  fixo). As ROTAS amarram um tópico de origem a N alvos {sink, toTopic?, partitionKey?, partitioning?}:
 #    - toTopic presente: renomeia no destino;  toTopic ausente: preserva o nome de origem.
+#    - partitioning: key (padrão; o producer particiona pela key) | preserve (partição P da
+#      origem → partição P do destino; exige destino existente com >= partições; incompatível
+#      com partitionKey). Exemplo completo em docs/examples/cdc-mirror-preserve.yaml.
 #  Os tópicos consumidos por uma origem são a união dos `fromTopic` de suas rotas.
 #  Cada DESTINO tem sua própria fila durável (NQueue) em `queue.basePath/<id>/`; se um
 #  destino fica offline, suas mensagens ficam na fila e são re-entregues quando ele volta.
@@ -34,10 +37,11 @@ nstreamreplay:
       extraProps: {}                       # passthrough cru p/ o KafkaProducer
       queue:                               # store-and-forward POR DESTINO
         basePath: "var/n-stream-replay/queues"  # fila física em basePath/<sinkId>/
-        maxDepth: 200000                   # bound por CONTAGEM (drop-oldest)
-        retentionTime: 6h                  # bound por TEMPO (expireAfterWrite); 0s = off
+        maxDepth: 200000                   # bound por CONTAGEM (drop-oldest; ou marca d'água do block)
+        overflowPolicy: drop-oldest        # drop-oldest | block (nunca descarta; freia a origem)
+        retentionTime: 6h                  # bound por TEMPO (expireAfterWrite); 0s = off (obrigatório com block)
         durability: sync-on-commit         # sync-on-commit | per-record-fsync | os-managed
-        onWriteError: drop                 # drop | halt  (em falha de escrita local)
+        onWriteError: drop                 # drop | halt  (em falha de escrita local; use halt com block)
         batchSize: 256                     # lote drenado por iteração do forwarder
         forwarderRetryBackoffMs: 1000      # backoff quando o broker do destino está fora
 
@@ -53,3 +57,5 @@ nstreamreplay:
         # - { sink: dc2-mirror, toTopic: orders.mirror, partitionKey: "payload.Id" }
         # Substitua o alvo acima; políticas diferentes para o mesmo destino impedem o boot.
         # - { sink: dc2-mirror }                          # (toTopic ausente = preserva "orders.in")
+        # Mantém a partição da origem (ex.: CDC com marcadores por partição); sem partitionKey:
+        # - { sink: dc2-mirror, toTopic: orders.mirror, partitioning: preserve }

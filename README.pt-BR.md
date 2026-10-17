@@ -17,6 +17,7 @@ orders.in (orders-src) ┤
 - **fan-out:** uma rota com vários `to` (1 tópico → N destinos).
 - **merge:** duas rotas com o mesmo `{sink, toTopic}` (N tópicos → 1 destino).
 - **espelho:** `toTopic` omitido → o destino preserva o nome do tópico de origem.
+- **partições preservadas:** `partitioning: preserve` no alvo mantém a partição (P da origem → P do destino); veja abaixo.
 - **rate limit por origem:** `maxConsumeRatePerSec` (registros/s; `0` = ilimitado) limita a taxa de consumo da origem.
 
 ## Decoder e chave de publicação
@@ -78,6 +79,83 @@ e `keyTypeDropped` (por alvo deduplicado). Também são expostos por source no P
 veja os nomes completos na [arquitetura](docs/architecture.md). São contadores da execução
 atual; reprocessamentos após falha de commit podem contabilizar novamente o descarte.
 
+## Preservar a partição de origem (`partitioning: preserve`)
+
+Por padrão (`partitioning: key`) o producer do destino escolhe a partição pela chave do
+registro. Isso quebra quem depende da **partição**: por exemplo, um tópico de CDC cujos
+marcadores de controle (`reset`, `snapshot_end`, `resume`, `retain`) são publicados **uma vez
+em cada partição, todos com a mesma chave**, e cujo consumidor reconstrói o estado por
+partição. Reparticionar pela chave juntaria as cópias do marcador numa partição só.
+
+```yaml
+routes:
+  - id: alarms-cdc-mirror
+    source: prod-cdc
+    fromTopic: fault.alarms.cdc
+    to:
+      - { sink: dev-cdc-mirror, partitioning: preserve }   # toTopic opcional
+```
+
+- O registro da partição **P** da origem vai para a partição **P** do destino, com a chave em
+  bytes crus, os headers, o valor e o timestamp intactos. A ordem dentro de cada partição é
+  mantida (FIFO por destino; producer com `acks=all` idempotente, ou `max.in.flight=1`
+  quando não há idempotência, para o retry não reordenar).
+- **Pré-requisito:** o tópico de destino já existe e tem **pelo menos tantas partições quanto
+  o de origem**. A aplicação **não cria tópicos**; na subida ela consulta origem e destino
+  (`Admin`) e **não sobe** se o destino não existir, tiver menos partições ou se algum cluster
+  não puder ser consultado. A mensagem nomeia rota, tópicos e contagens. Rotas sem `preserve`
+  não abrem conexão administrativa.
+- `preserve` com `partitionKey` no mesmo alvo é erro de configuração. Alvos idênticos
+  (mesma origem/tópico/sink/destino) com `partitioning` diferente também impedem o boot.
+- A partição de destino é gravada junto com o registro na fila durável. **Compatibilidade:**
+  filas gravadas pela v2.3.x continuam legíveis após o upgrade e os registros antigos são
+  publicados como antes (sem partição fixa, pela chave). Voltar para a v2.3.x com uma fila
+  já escrita pela 2.4.0 ignora a partição gravada.
+- Se o destino ganhar uma partição inexistente (ex.: a origem foi ampliada depois), o envio
+  daquele registro falha de forma transitória: o registro **fica na fila** (não é descartado)
+  e é retentado; aumente as partições do destino. O lote para de ser enviado no ponto da
+  falha.
+
+## Fila sem descarte (`overflowPolicy: block`)
+
+Por padrão (`overflowPolicy: drop-oldest`) a fila descarta o registro mais antigo ao atingir
+`maxDepth`. Para espelhos que **não podem perder nada**:
+
+```yaml
+sinks:
+  - id: dev-cdc-mirror
+    bootstrapServers: "kafka-dev:9092"
+    acks: all
+    queue:
+      maxDepth: 200000
+      overflowPolicy: block
+      onWriteError: halt
+      retentionTime: 0s
+      durability: sync-on-commit
+```
+
+- Com `block` a fila **nunca descarta** por contagem. `maxDepth` vira uma **marca d'água**: ao
+  atingi-la o destino é considerado saturado e a origem é freada.
+- **Backpressure sem rebalance:** o `SourceConsumer` faz `pause()` das partições cujos tópicos
+  roteiam para um destino saturado e **continua chamando `poll`** (que não devolve registros
+  das partições pausadas). O consumer group mantém heartbeat e `max.poll.interval.ms`, então
+  não sofre rebalance; o que não foi lido continua no tópico de origem. As partições voltam
+  (`resume()`) quando a fila drena até **metade** de `maxDepth` (histerese). A fila pode
+  exceder `maxDepth` em até um lote (`maxPollRecords`) por origem.
+- Um destino saturado freia todo tópico que roteia para ele, inclusive o fan-out para
+  destinos saudáveis. Por isso use um **sink dedicado** para o espelho sem perda e não o
+  compartilhe com rotas que aceitam descarte.
+- `block` com `retentionTime > 0` é erro de configuração (a expiração por tempo descartaria
+  registros). **Use `block` com `onWriteError: halt`**: com `drop`, uma falha de escrita local
+  ainda descarta o registro (a aplicação apenas avisa em log).
+- Continuam descartando, mesmo com `block`: registros venenosos (oversize acima de
+  `maxRequestSize` / rejeição permanente do Kafka, contados em `poisoned_total`) — alerte neles.
+- Garantia: at-least-once. O espelho pode duplicar (crash, retry parcial), mas não perde. Em
+  retry de um lote parcialmente entregue, registros além do ponto de falha podem ter sido
+  entregues antes e são reenviados em ordem; o consumidor do destino deve ser idempotente.
+
+Exemplo completo: [`docs/examples/cdc-mirror-preserve.yaml`](docs/examples/cdc-mirror-preserve.yaml).
+
 ## Stack
 - Java 25, Spring Boot 3.5.6 (web servlet, apenas para expor métricas)
 - `kafka-clients` 3.9.1 (consumers/producers crus — sem Spring Kafka)
@@ -114,7 +192,8 @@ java -jar target/n-stream-replay-*.jar --spring.config.additional-location=file:
 ## Garantias e contrato
 - **At-least-once.** Após crash/restart pode haver **duplicatas** no destino — sinks devem tolerar redelivery. Não há dedup nem exactly-once no MVP.
 - **Durabilidade `sync-on-commit` (default):** o offset da origem só é commitado depois que o lote foi gravado e sincronizado (`fsync`) em todas as filas-destino.
-- **Bounded drop-oldest:** cada fila é limitada por `maxDepth` (contagem) e/ou `retentionTime` (tempo); ao estourar, os registros **mais antigos não entregues são descartados** (perda intencional, contabilizada em `dropped`/`expired`).
+- **Bounded drop-oldest (default):** cada fila é limitada por `maxDepth` (contagem) e/ou `retentionTime` (tempo); ao estourar, os registros **mais antigos não entregues são descartados** (perda intencional, contabilizada em `dropped`/`expired`).
+- **Sem descarte (`overflowPolicy: block`):** nada é descartado; a origem é freada por `pause()`/`resume()` enquanto o destino estiver saturado. Exige `retentionTime: 0s` e deve ser usado com `onWriteError: halt`.
 
 ## Documentação
 - [Arquitetura](docs/architecture.md) — componentes, garantias de corretude, métricas.

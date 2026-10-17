@@ -26,6 +26,8 @@ When a Kafka destination is unavailable, directly forwarding from a consumer to 
 - **Flexible topic routing:** mirror the original topic name, rename it, fan out a topic to multiple destinations, or merge several source topics into a destination topic.
 - **Payload preservation:** forward the original Kafka message payload without reserializing it; retain keys, headers, and timestamps unless a target explicitly overrides its key.
 - **Optional JSON/YAML partition keys:** extract a scalar from a configured payload field for a specific target; route-level decoder overrides a source-level default.
+- **Partition-preserving mirrors:** `partitioning: preserve` publishes the record of source partition P to destination partition P, keeping raw key bytes and headers intact (for example CDC streams whose control markers are published once per partition under one key).
+- **No-drop queues:** `overflowPolicy: block` never discards queued records; when a sink queue reaches `maxDepth` the source partitions feeding it are paused (without leaving the consumer group) until the queue drains.
 - **Source-side rate limiting:** cap consumption using `maxConsumeRatePerSec`, or set it to `0` for no limit.
 - **Configurable durability and retention:** choose `sync-on-commit`, `per-record-fsync`, or `os-managed`; configure queue bounds and local write-error behavior.
 - **Prometheus observability:** source, sink, queue-depth, retry, throughput, and intentional-drop counters via Spring Boot Actuator.
@@ -124,6 +126,31 @@ nstreamreplay:
 
 This is an **illustrative configuration**, not a zero-data-loss guarantee. A queue can intentionally discard old messages when `maxDepth` or `retentionTime` limits are reached, even if records were originally persisted. `onWriteError: halt` concerns **local queue write errors**; it does not turn bounded retention into unlimited storage. See the [production-style AcmePay scenario](docs/usage-example.md) for more settings, examples, and operational tradeoffs.
 
+### Partition-preserving mirror with a no-drop queue
+
+```yaml
+sinks:
+  - id: dev-cdc-mirror               # dedicated sink: do not share it with routes that accept loss
+    bootstrapServers: "kafka-dev:9092"
+    acks: all
+    queue:
+      overflowPolicy: block          # never discard; pause the source instead
+      onWriteError: halt             # a local write failure stops the source without committing
+      retentionTime: 0s              # required with block
+      durability: sync-on-commit
+routes:
+  - id: alarms-cdc-mirror
+    source: prod-cdc
+    fromTopic: fault.alarms.cdc
+    to:
+      - { sink: dev-cdc-mirror, partitioning: preserve }
+```
+
+- `preserve` requires the destination topic to **already exist with at least as many partitions as the source topic**. The application never creates topics; at startup it checks both clusters and refuses to start (naming the route, topics, and partition counts) otherwise. `preserve` together with `partitionKey` on the same target is a configuration error.
+- The destination partition is stored with each record in the durable queue. Queues written by v2.3.x remain readable after upgrading; those records are published as before (partitioned by key).
+- With `overflowPolicy: block` the source consumer calls `pause()` on the partitions that feed a saturated sink while it keeps calling `poll`, so the consumer group does not rebalance. Partitions resume once the queue drains to half of `maxDepth` (`maxDepth` becomes a high-water mark that may be exceeded by at most one poll batch per source). A saturated sink slows every topic routed to it, so give no-loss mirrors a dedicated sink. `block` with `retentionTime > 0` is rejected; combine it with `onWriteError: halt`.
+- The mirror is still at-least-once: duplicates are possible after retries or crashes, loss is not. Full example: [`docs/examples/cdc-mirror-preserve.yaml`](docs/examples/cdc-mirror-preserve.yaml).
+
 ### Routing modes
 
 | Mode | Configuration idea | Result |
@@ -133,6 +160,7 @@ This is an **illustrative configuration**, not a zero-data-loss guarantee. A que
 | Fan-out | Multiple `to` targets | One source topic to multiple destinations |
 | Merge | Multiple routes share a sink and `toTopic` | Multiple source topics to one destination topic |
 | Key extraction | `decoder: json` or `yaml` plus `partitionKey` on a target | Set the Kafka key from a scalar payload field |
+| Partition preserving | `partitioning: preserve` on a target (no `partitionKey`) | Source partition P goes to destination partition P |
 | Rate limiting | `maxConsumeRatePerSec` on a source | Bound ingestion rate per source |
 
 ## Reliability, boundaries, and operations
@@ -141,7 +169,7 @@ This is an **illustrative configuration**, not a zero-data-loss guarantee. A que
 
 **Delivery:** at-least-once. There is no exactly-once delivery or built-in duplicate suppression.
 
-**Bounded queues:** `maxDepth` and `retentionTime` can drop old, undelivered records. Track `dropped`, `expired`, and routing-drop metrics and alert on nonzero increases. Provision disks and choose queue limits consistent with your outage tolerance.
+**Bounded queues:** by default (`overflowPolicy: drop-oldest`) `maxDepth` and `retentionTime` can drop old, undelivered records. With `overflowPolicy: block` nothing is dropped by count or time; the source is paused instead (see above). Track `dropped`, `expired`, and routing-drop metrics and alert on nonzero increases. Provision disks and choose queue limits consistent with your outage tolerance.
 
 **Errors:** transient destination failures are retried. Non-retryable/oversized records can be discarded as poisoned records. Invalid extracted partition keys can cause target-specific drops without corrupting the payload for other routes.
 

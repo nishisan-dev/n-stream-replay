@@ -74,6 +74,12 @@ public final class SinkForwarder implements Runnable {
                 if (!sleep(retryBackoffMs)) {
                     break;
                 }
+            } catch (Error e) {
+                // Um Error (StackOverflowError, OOM) não pode matar a thread em silêncio: o destino
+                // fica parado e visível em halted(), sem confirmar nada; só o reinício retoma.
+                haltedReason = "forwarder interrompido por erro fatal: " + e;
+                LOG.error("[{}] forwarder PARADO por erro fatal; nada foi confirmado, profundidade da fila={}",
+                        sinkId, queue.depth(), e);
             }
         }
         LOG.info("[{}] forwarder encerrado", sinkId);

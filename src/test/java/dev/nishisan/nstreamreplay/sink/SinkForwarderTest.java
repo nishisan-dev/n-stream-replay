@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 
@@ -133,6 +134,40 @@ class SinkForwarderTest {
             assertThat(q.depth()).isZero();
             assertThat(fwd.online()).isTrue();
             assertThat(sink.delivered.stream().map(SinkForwarderTest::val)).containsExactly(1, 2, 3, 4, 5);
+        }
+    }
+
+    @Test
+    void erroFatalParaOForwarderVisivelSemMatarAThreadNemConfirmar(@TempDir Path tmp) throws Exception {
+        try (DurableSinkQueue q = DurableSinkQueue.open("s", cfg(tmp, 100))) {
+            for (int i = 1; i <= 3; i++) {
+                q.offer(rec(i));
+            }
+            FakeSink sink = new FakeSink();
+            AtomicInteger calls = new AtomicInteger();
+            sink.behavior = batch -> {
+                calls.incrementAndGet();
+                throw new StackOverflowError("simulado");
+            };
+            SinkForwarder fwd = new SinkForwarder("s", q, sink, 0L);
+            Thread forwarderThread = new Thread(fwd, "fwd-error");
+            forwarderThread.start();
+            try {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (!fwd.halted() && System.nanoTime() < deadline) {
+                    Thread.sleep(10);
+                }
+                assertThat(fwd.halted()).isTrue();
+                assertThat(fwd.haltedReason()).contains("StackOverflowError");
+                Thread.sleep(200);
+                assertThat(forwarderThread.isAlive()).isTrue();
+                assertThat(calls.get()).isEqualTo(1);
+                assertThat(q.depth()).isEqualTo(3);
+                assertThat(fwd.publishedTotal()).isZero();
+            } finally {
+                fwd.stop();
+                forwarderThread.join(5_000);
+            }
         }
     }
 

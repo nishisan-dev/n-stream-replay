@@ -195,4 +195,21 @@ class NStreamReplayPropertiesBindingTest {
         assertThat(props.sinks().get(0).queue().blocksOnOverflow()).isTrue();
         assertThat(props.sinks().get(1).queue().overflowPolicy()).isEqualTo(OverflowPolicy.DROP_OLDEST);
     }
+
+    @Test
+    void exemploDeEspelhoCdcLigaEPassaNaValidacao() throws Exception {
+        String yaml = java.nio.file.Files.readString(java.nio.file.Path.of("docs/examples/cdc-mirror-preserve.yaml"));
+
+        NStreamReplayProperties props = bind(yaml);
+
+        ConfigValidator.validate(props);
+        QueueProperties queue = props.sinks().get(0).queue();
+        assertThat(queue.overflowPolicy()).isEqualTo(OverflowPolicy.BLOCK);
+        assertThat(queue.onWriteError()).isEqualTo(OnWriteError.HALT);
+        assertThat(queue.durability()).isEqualTo(Durability.SYNC_ON_COMMIT);
+        assertThat(queue.hasRetentionTime()).isFalse();
+        RouteTarget target = props.routes().get(0).to().get(0);
+        assertThat(target.partitioning()).isEqualTo(Partitioning.PRESERVE);
+        assertThat(target.partitionKey()).isNull();
+    }
 }

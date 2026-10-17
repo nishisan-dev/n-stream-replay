@@ -136,6 +136,7 @@ sinks:
     queue:
       overflowPolicy: block          # never discard; pause the source instead
       onWriteError: halt             # a local write failure stops the source without committing
+      onPoison: halt                 # a record Kafka rejects permanently halts this sink instead of being dropped
       retentionTime: 0s              # required with block
       durability: sync-on-commit
 routes:
@@ -148,8 +149,17 @@ routes:
 
 - `preserve` requires the destination topic to **already exist with at least as many partitions as the source topic**. The application never creates topics; at startup it checks both clusters and refuses to start (naming the route, topics, and partition counts) otherwise. `preserve` together with `partitionKey` on the same target is a configuration error.
 - The destination partition is stored with each record in the durable queue. Queues written by v2.3.x remain readable after upgrading; those records are published as before (partitioned by key).
-- With `overflowPolicy: block` the source consumer calls `pause()` on the partitions that feed a saturated sink while it keeps calling `poll`, so the consumer group does not rebalance. Partitions resume once the queue drains to half of `maxDepth` (`maxDepth` becomes a high-water mark that may be exceeded by at most one poll batch per source). A saturated sink slows every topic routed to it, so give no-loss mirrors a dedicated sink. `block` with `retentionTime > 0` is rejected; combine it with `onWriteError: halt`.
+- With `overflowPolicy: block` the source consumer calls `pause()` on the partitions that feed a saturated sink while it keeps calling `poll`, so the consumer group does not rebalance. Partitions resume once the queue drains to half of `maxDepth` (`maxDepth` becomes a high-water mark that may be exceeded by at most one poll batch per source). A saturated sink slows every topic routed to it, so give no-loss mirrors a dedicated sink. `block` requires `retentionTime: 0s`, `onWriteError: halt` and `onPoison: halt`; otherwise startup fails.
+- `onPoison`: a permanent Kafka rejection (`RecordTooLargeException`, `TopicAuthorizationException`, `OutOfOrderSequenceException`, ...) or an oversize payload is, by default (`drop`), discarded and counted in `poisoned_total` — the source offset was already committed, so the record is lost. With `onPoison: halt` only **that sink's forwarder** stops and does **not** acknowledge the record, which stays at the head of the queue; an `ERROR` log names the source topic/partition/offset and the reason, and `sink.<id>.halted` is exported. The queue keeps growing until saturated (the source then pauses under `block`), other routes and sinks keep running, and the application stays up. Resuming requires fixing the destination and **restarting the process**, which resends the record. Keep the destination topic's `max.message.bytes` above the producer `batch.size` (16 KB by default); below it the Kafka 3.9 client can split a rejected batch in a loop and overflow its stack — nothing is lost (the batch stays queued) but the error is not classified.
+- Not covered by the zero-loss claim: deleting the queue disk, and **headers with a repeated key** (one value per header key is kept).
 - The mirror is still at-least-once: duplicates are possible after retries or crashes, loss is not. Full example: [`docs/examples/cdc-mirror-preserve.yaml`](docs/examples/cdc-mirror-preserve.yaml).
+
+### Upgrading to 2.4.0
+
+- New options default to the previous behavior. With `acks` other than `all` (including the default `"1"`), the producer now uses `max.in.flight.requests.per.connection=1` so a retried batch cannot reorder records within a partition; the throughput impact is expected to be small but was not measured. Use `acks: all` (idempotent) or set the property in `extraProps` to change it.
+- Header order is preserved and a header with a null value no longer throws. Repeated header keys still collapse into one.
+- Queues written by v2.3.x stay readable. **Drain the queues before rolling back to 2.3.x**: 2.3.x ignores the stored destination partition, and a queue holding a null-valued header written by 2.4.0 triggers a `NullPointerException` in 2.3.1.
+- Use an **absolute** `queue.basePath` on persistent storage; a relative path depends on the working directory.
 
 ### Routing modes
 
@@ -169,7 +179,7 @@ routes:
 
 **Delivery:** at-least-once. There is no exactly-once delivery or built-in duplicate suppression.
 
-**Bounded queues:** by default (`overflowPolicy: drop-oldest`) `maxDepth` and `retentionTime` can drop old, undelivered records. With `overflowPolicy: block` nothing is dropped by count or time; the source is paused instead (see above). Track `dropped`, `expired`, and routing-drop metrics and alert on nonzero increases. Provision disks and choose queue limits consistent with your outage tolerance.
+**Bounded queues:** by default (`overflowPolicy: drop-oldest`) `maxDepth` and `retentionTime` can drop old, undelivered records. With `overflowPolicy: block` nothing is dropped by count or time; the source is paused instead, and permanently rejected records halt that sink when `onPoison: halt` (see above). Track `dropped`, `expired`, and routing-drop metrics and alert on nonzero increases. Provision disks and choose queue limits consistent with your outage tolerance.
 
 **Errors:** transient destination failures are retried. Non-retryable/oversized records can be discarded as poisoned records. Invalid extracted partition keys can cause target-specific drops without corrupting the payload for other routes.
 

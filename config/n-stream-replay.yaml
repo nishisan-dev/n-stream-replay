@@ -36,12 +36,13 @@ nstreamreplay:
       maxRequestSize: 1048576              # bytes (>= 1 MiB)
       extraProps: {}                       # passthrough cru p/ o KafkaProducer
       queue:                               # store-and-forward POR DESTINO
-        basePath: "var/n-stream-replay/queues"  # fila física em basePath/<sinkId>/
+        basePath: "var/n-stream-replay/queues"  # fila física em basePath/<sinkId>/ (em produção use caminho ABSOLUTO)
         maxDepth: 200000                   # bound por CONTAGEM (drop-oldest; ou marca d'água do block)
         overflowPolicy: drop-oldest        # drop-oldest | block (nunca descarta; freia a origem)
         retentionTime: 6h                  # bound por TEMPO (expireAfterWrite); 0s = off (obrigatório com block)
         durability: sync-on-commit         # sync-on-commit | per-record-fsync | os-managed
-        onWriteError: drop                 # drop | halt  (em falha de escrita local; use halt com block)
+        onWriteError: drop                 # drop | halt  (em falha de escrita local; block exige halt)
+        onPoison: drop                     # drop | halt  (registro rejeitado em definitivo pelo Kafka; block exige halt)
         batchSize: 256                     # lote drenado por iteração do forwarder
         forwarderRetryBackoffMs: 1000      # backoff quando o broker do destino está fora
 

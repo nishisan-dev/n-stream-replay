@@ -25,7 +25,7 @@
 | Kafka Connect cluster required | No | Built on Kafka Connect |
 | Message delivery guarantee | At-least-once; duplicates possible | Depends on MM2/Kafka Connect deployment and failure conditions |
 | Partition-preserving mirroring | Yes, per target (`partitioning: preserve`; destination topic must pre-exist with enough partitions) | Not evaluated here |
-| Unbounded buffering / guaranteed zero loss | Not by default (`drop-oldest`); `overflowPolicy: block` stops queue drops by pausing the source, but poison drops, disk capacity and local write behavior still matter | No universal zero-loss guarantee |
+| Unbounded buffering / guaranteed zero loss | Not by default (`drop-oldest`); `overflowPolicy: block` with `onPoison: halt` and `onWriteError: halt` stops queue, poison and write-error drops by pausing the source or halting the sink, but disk loss and repeated header keys are outside the guarantee | No universal zero-loss guarantee |
 | Published throughput benchmark vs. MM2 | None asserted | Not evaluated here |
 
 ## Why disk-backed queues per destination matter

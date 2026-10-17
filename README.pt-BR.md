@@ -130,6 +130,7 @@ sinks:
       maxDepth: 200000
       overflowPolicy: block
       onWriteError: halt
+      onPoison: halt
       retentionTime: 0s
       durability: sync-on-commit
 ```
@@ -145,16 +146,55 @@ sinks:
 - Um destino saturado freia todo tópico que roteia para ele, inclusive o fan-out para
   destinos saudáveis. Por isso use um **sink dedicado** para o espelho sem perda e não o
   compartilhe com rotas que aceitam descarte.
-- `block` com `retentionTime > 0` é erro de configuração (a expiração por tempo descartaria
-  registros). **Use `block` com `onWriteError: halt`**: com `drop`, uma falha de escrita local
-  ainda descarta o registro (a aplicação apenas avisa em log).
-- Continuam descartando, mesmo com `block`: registros venenosos (oversize acima de
-  `maxRequestSize` / rejeição permanente do Kafka, contados em `poisoned_total`) — alerte neles.
-- Garantia: at-least-once. O espelho pode duplicar (crash, retry parcial), mas não perde. Em
+- **`block` exige, na validação da subida:** `retentionTime: 0s` (a expiração por tempo
+  descartaria registros), `onWriteError: halt` (com `drop` uma falha de escrita local
+  descartaria o registro) e `onPoison: halt` (veja abaixo). Qualquer outro valor é erro de
+  configuração e a aplicação não sobe.
+- **Registro rejeitado em definitivo (`onPoison`).** Um erro permanente do Kafka
+  (`RecordTooLargeException`, `TopicAuthorizationException`, `ClusterAuthorizationException`,
+  `OutOfOrderSequenceException`, `UnknownProducerIdException`, `InvalidTopicException`, ...) ou um
+  payload acima de `maxRequestSize` não pode ser reentregue. Com `onPoison: drop` (padrão) o
+  registro é descartado e contado em `poisoned_total` — como o offset da origem já foi
+  commitado, ele é **perdido**. Com `onPoison: halt` o forwarder **daquele sink** para de
+  entregar e **não confirma** o registro, que fica na cabeça da fila; loga `ERROR` com
+  tópico/partição/offset de origem e o motivo e expõe `sink.<id>.halted` (1/0) e a linha
+  `halted=YES (...)` no relatório de stats. A fila segue crescendo até saturar; com `block` a
+  origem pausa. As demais rotas e sinks seguem normais e a aplicação não cai. **Retomar exige
+  corrigir o destino (limite do tópico, ACL, ...) e reiniciar o processo**, que reenvia o
+  registro; se ainda for inválido, para de novo.
+- Não coberto pela garantia de zero perda: apagamento do disco da fila e **headers com chave
+  repetida** (o relay guarda um valor por chave de header; o último vence). Alerte em
+  `poisoned_total`, `offer_errors_total` e `halted`.
+- Mantenha o `max.message.bytes` do tópico de destino **maior que o `batch.size` do producer**
+  (16 KB por padrão). Com o limite abaixo disso o cliente Kafka 3.9 pode dividir em laço o batch
+  rejeitado e estourar a pilha; o relay não perde nem descarta nada nesse caso (o lote fica na
+  fila), mas também não classifica o erro nem para: ajuste o limite ou o `batch.size`.
+- Garantia: at-least-once. O espelho pode duplicar (crash, retry parcial), mas não perde pelos
+  mecanismos acima. Em
   retry de um lote parcialmente entregue, registros além do ponto de falha podem ter sido
   entregues antes e são reenviados em ordem; o consumidor do destino deve ser idempotente.
 
 Exemplo completo: [`docs/examples/cdc-mirror-preserve.yaml`](docs/examples/cdc-mirror-preserve.yaml).
+
+## Notas da versão 2.4.0 e upgrade
+
+- Novos: `partitioning: preserve`, `overflowPolicy: block`, `onPoison: halt`, checagem de
+  partições na subida, backpressure por `pause()`/`resume()` (inclusive logo após um rebalance).
+  Os padrões mantêm o comportamento anterior.
+- **Efeito em sinks com `acks` diferente de `all`** (inclui o padrão `acks: "1"`): o producer passa a
+  usar `max.in.flight.requests.per.connection=1`, para que o retry de um batch não reordene
+  registros dentro da partição. Como o forwarder já envia o lote, faz `flush` e espera a confirmação
+  antes de seguir, o impacto esperado é pequeno, mas **não foi medido**; quem precisar de mais paralelismo
+  usa `acks: all` (idempotência, ordem garantida) ou define a propriedade em `extraProps`.
+- **Headers:** a ordem dos headers é preservada e um header com valor nulo deixou de causar
+  `NullPointerException`. Headers com a mesma chave repetida ainda colapsam num só (limitação conhecida).
+- **Fila em disco:** a partição de destino é um campo novo do registro persistido; filas gravadas
+  pela 2.3.x continuam legíveis. **Antes de voltar para a 2.3.x, drene as filas** (e pare a
+  origem): a 2.3.x ignora `destinationPartition` e **uma fila com registro de header de valor nulo
+  gravada pela 2.4.0 provoca `NullPointerException` na 2.3.1**.
+- Use `queue.basePath` **absoluto**, em volume persistente. Com caminho relativo a fila depende do
+  diretório de trabalho do processo e um reinício em outro diretório começa com a fila vazia,
+  deixando para trás os registros ainda não entregues.
 
 ## Stack
 - Java 25, Spring Boot 3.5.6 (web servlet, apenas para expor métricas)
@@ -193,7 +233,7 @@ java -jar target/n-stream-replay-*.jar --spring.config.additional-location=file:
 - **At-least-once.** Após crash/restart pode haver **duplicatas** no destino — sinks devem tolerar redelivery. Não há dedup nem exactly-once no MVP.
 - **Durabilidade `sync-on-commit` (default):** o offset da origem só é commitado depois que o lote foi gravado e sincronizado (`fsync`) em todas as filas-destino.
 - **Bounded drop-oldest (default):** cada fila é limitada por `maxDepth` (contagem) e/ou `retentionTime` (tempo); ao estourar, os registros **mais antigos não entregues são descartados** (perda intencional, contabilizada em `dropped`/`expired`).
-- **Sem descarte (`overflowPolicy: block`):** nada é descartado; a origem é freada por `pause()`/`resume()` enquanto o destino estiver saturado. Exige `retentionTime: 0s` e deve ser usado com `onWriteError: halt`.
+- **Sem descarte por fila (`overflowPolicy: block`):** a fila não descarta por contagem nem tempo; a origem é freada por `pause()`/`resume()` enquanto o destino estiver saturado. Exige `retentionTime: 0s`, `onWriteError: halt` e `onPoison: halt` (registro rejeitado em definitivo para o destino em vez de ser descartado).
 
 ## Documentação
 - [Arquitetura](docs/architecture.md) — componentes, garantias de corretude, métricas.

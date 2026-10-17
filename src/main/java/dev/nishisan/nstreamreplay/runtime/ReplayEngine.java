@@ -74,6 +74,8 @@ public class ReplayEngine implements SmartLifecycle {
                 properties.routes() == null ? 0 : properties.routes().size());
         ConfigValidator.validate(properties);
         try {
+            // Antes de abrir filas/producers: preserve exige destino existente com partições suficientes.
+            PartitionPreserveCheck.verify(properties, new AdminTopicPartitionCounter());
             openReferencedChannels();
             RouteTable routeTable = RouteTable.build(properties.routes(), channels);
             channels.values().forEach(SinkChannel::startForwarder);   // forwarders ANTES das origens

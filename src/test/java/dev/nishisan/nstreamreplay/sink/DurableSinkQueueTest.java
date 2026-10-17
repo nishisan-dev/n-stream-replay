@@ -415,4 +415,36 @@ class DurableSinkQueueTest {
             assertThat(reopened.saturated()).isFalse();
         }
     }
+
+    @Test
+    void filaGravadaPelaV231ContinuaLegivelSemParticaoDeDestino(@TempDir Path tmp) throws Exception {
+        // Fixture: diretório real de fila (backlog + retry) gravado pela v2.3.1, que ainda não tinha
+        // destinationPartition no ReplayRecord. 5 registros em voo na retry + 1 no backlog.
+        Path fixture = Path.of(getClass().getResource("/fixtures/queue-v2.3.1").toURI());
+        try (var files = java.nio.file.Files.walk(fixture)) {
+            for (Path source : (Iterable<Path>) files::iterator) {
+                Path target = tmp.resolve(fixture.relativize(source).toString());
+                if (java.nio.file.Files.isDirectory(source)) {
+                    java.nio.file.Files.createDirectories(target);
+                } else {
+                    java.nio.file.Files.copy(source, target);
+                }
+            }
+        }
+
+        try (DurableSinkQueue q = DurableSinkQueue.open("legacy", cfg(tmp, 1_000, Duration.ZERO, 10))) {
+            assertThat(q.depth()).isEqualTo(6);
+            List<ReplayRecord> all = new ArrayList<>();
+            List<ReplayRecord> batch;
+            while (!(batch = q.peekBatch()).isEmpty()) {
+                all.addAll(batch);
+                q.ack(batch.size());
+            }
+            assertThat(all.stream().map(ReplayRecord::offset)).containsExactly(1L, 2L, 3L, 4L, 5L, 6L);
+            assertThat(all).extracting(ReplayRecord::destinationPartition).containsOnlyNulls();   // = pela key
+            assertThat(all).extracting(ReplayRecord::destinationTopic).containsOnly("dst");
+            assertThat(new String(all.get(2).key(), StandardCharsets.UTF_8)).isEqualTo("k3");
+            assertThat(all.get(2).headers().get("h")).containsExactly((byte) 3);
+        }
+    }
 }

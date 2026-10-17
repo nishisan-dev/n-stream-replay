@@ -1,6 +1,7 @@
 target/
 var/
 *.log
+!src/test/resources/fixtures/**/*.log
 *.class
 
 # IDE
